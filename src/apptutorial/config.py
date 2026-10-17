@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 IDENTIFY_MODEL = "claude-sonnet-5"  # app ID, tutorial planning, answering questions
 VERIFY_MODEL = "claude-haiku-4-5"  # fast "did they do the step?" check
 
-DEFAULT_HOTKEY = "ctrl+alt+h"
+DEFAULT_HOTKEY = "ctrl+alt+t"
 
 # Sensitive apps where capture auto-disables (matched on lowercased process name).
 DEFAULT_DENYLIST: tuple[str, ...] = (
