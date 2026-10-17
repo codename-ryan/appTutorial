@@ -1,11 +1,14 @@
-"""Capture backend interface.
+"""Capture backend interface, the Windows implementation, and a platform factory.
 
 Windows is the only backend in v1 (see SPEC.md). Keeping capture behind this interface
-lets a macOS backend be added later without touching the rest of the app.
+lets a macOS backend be added later without touching the rest of the app. The concrete
+Windows backend lazy-imports the platform helpers so this module stays import-safe
+everywhere (the abstract types are used by tests and the factory).
 """
 
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -44,3 +47,24 @@ class CaptureBackend(ABC):
     @abstractmethod
     def capture_window(self, window: WindowInfo) -> Screenshot:
         """Capture only the given window region, normalized for DPI scale."""
+
+
+class WindowsCaptureBackend(CaptureBackend):
+    """Windows capture via pywin32 + mss (see capture/window.py, capture/screenshot.py)."""
+
+    def active_window(self) -> WindowInfo | None:
+        from apptutorial.capture.window import get_active_window
+
+        return get_active_window()
+
+    def capture_window(self, window: WindowInfo) -> Screenshot:
+        from apptutorial.capture.screenshot import capture_window as _capture
+
+        return _capture(window)
+
+
+def get_capture_backend() -> CaptureBackend:
+    """Return the capture backend for the current platform."""
+    if sys.platform == "win32":
+        return WindowsCaptureBackend()
+    raise NotImplementedError(f"No capture backend for platform {sys.platform!r}")

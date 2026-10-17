@@ -1,7 +1,8 @@
-"""appTutorial entry point.
+"""appTutorial entry point and session orchestrator.
 
-M0: launches a do-nothing system tray icon. Later milestones add the global hotkey,
-capture pipeline, AI layer, and the guided step panel.
+M1: global hotkey -> capture the active window (DPI-correct) -> show a preview, with a
+sensitive-app denylist, a tray capture indicator, and a pause toggle. Later milestones add
+app identification, the tutorial menu, and the guided step panel.
 """
 
 from __future__ import annotations
@@ -9,28 +10,82 @@ from __future__ import annotations
 import argparse
 import sys
 
+from PySide6.QtCore import QObject
+
 from apptutorial import __version__
+from apptutorial.capture.backend import CaptureBackend, get_capture_backend
 from apptutorial.config import Config, load_config
+from apptutorial.hotkey import HotkeyManager
+from apptutorial.privacy.denylist import is_denied
+from apptutorial.ui.preview import CapturePreview
+from apptutorial.ui.tray import TrayIcon
 
 
-def _build(config: Config):
-    """Construct the QApplication and tray icon. Returns ``(app, tray)``."""
+class AppController(QObject):
+    """Owns session state and wires the tray, hotkey, capture, and preview together."""
+
+    def __init__(self, config: Config, app, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self.app = app
+        self.paused = False
+        self.backend: CaptureBackend = get_capture_backend()
+        self.tray = TrayIcon(app, config.hotkey)
+        self.hotkey = HotkeyManager(config.hotkey)
+        self.preview = CapturePreview()
+
+        self.tray.capture_requested.connect(self.trigger_capture)
+        self.tray.pause_toggled.connect(self.set_paused)
+        self.tray.quit_requested.connect(app.quit)
+        self.hotkey.triggered.connect(self.trigger_capture)
+
+    def start(self) -> None:
+        self.tray.show()
+        if not self.hotkey.start():
+            self.tray.notify(
+                "appTutorial",
+                f"Could not register hotkey {self.config.hotkey}. "
+                "Use the tray menu to capture.",
+            )
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+        self.tray.set_paused(paused)
+
+    def trigger_capture(self) -> None:
+        if self.paused:
+            self.tray.notify("appTutorial", "Capture is paused.")
+            return
+        window = self.backend.active_window()
+        if window is None:
+            self.tray.notify("appTutorial", "No active window detected.")
+            return
+        if is_denied(window.process_name, self.config.denylist):
+            self.tray.notify(
+                "appTutorial",
+                f"Capture disabled for {window.process_name} (sensitive app).",
+            )
+            return
+        try:
+            screenshot = self.backend.capture_window(window)
+        except Exception as exc:  # surface any capture failure to the user, don't crash
+            self.tray.notify("appTutorial", f"Capture failed: {exc}")
+            return
+        self.preview.show_capture(window, screenshot)
+
+
+def _make_app():
     from PySide6.QtWidgets import QApplication
-
-    from apptutorial.ui.tray import build_tray
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("appTutorial")
-    # Tray app: don't quit when a transient window closes.
     app.setQuitOnLastWindowClosed(False)
-    tray = build_tray(app)
-    return app, tray
+    return app
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="apptutorial",
-        description="AI-powered on-screen software tutor",
+        prog="apptutorial", description="AI-powered on-screen software tutor"
     )
     parser.add_argument(
         "--version", action="version", version=f"apptutorial {__version__}"
@@ -38,21 +93,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Initialize config + UI objects and exit without the event loop (for verification).",
+        help="Initialize everything and exit without the event loop (for verification).",
     )
     args = parser.parse_args(argv)
 
+    from apptutorial.capture.window import ensure_dpi_awareness
+
+    ensure_dpi_awareness()
     config = load_config()
-    app, tray = _build(config)
+    app = _make_app()
+    controller = AppController(config, app)
 
     if args.check:
-        print(f"apptutorial {__version__} - M0 OK: config loaded, tray built.")
+        print(f"apptutorial {__version__} - M1 OK: capture + tray + hotkey wired.")
         print(f"  api key present : {config.has_api_key}")
-        print(f"  hotkey          : {config.hotkey}")
+        print(f"  hotkey          : {config.hotkey}  (pynput: {controller.hotkey.combo})")
+        print(f"  backend         : {type(controller.backend).__name__}")
         print(f"  denylist entries: {len(config.denylist)}")
         return 0
 
-    tray.show()
+    controller.start()
     return app.exec()
 
 
