@@ -2,9 +2,11 @@
 
 Flow: hotkey -> capture the active window -> read UI elements + identify the app -> show a
 tutorial menu (suggested tutorials or a typed goal) -> plan the steps with Claude Sonnet 5 ->
-guide the user one step at a time, watching the screen locally and asking Claude Haiku to
-verify each step before advancing. Includes the sensitive-app denylist, tray capture
-indicator + pause, single-instance guard, and local per-call telemetry.
+guide the user one step at a time. Each step is verified with a hybrid check: a deterministic
+local UIA check when the step's completion is a well-defined state (a tab selected, a dialog
+open, a cell selected), falling back to a Claude Haiku vision check for visual steps. Includes
+the sensitive-app denylist, tray capture indicator + pause, single-instance guard, and local
+per-call telemetry.
 """
 
 from __future__ import annotations
@@ -208,6 +210,31 @@ class _ResolveTask(QRunnable):
         self.signals.resolved.emit(self._step_index, rect)
 
 
+class _LocalCheckSignals(QObject):
+    result = Signal(object)  # True (done) / False (not done) / None (undetermined -> use AI)
+
+
+class _LocalCheckTask(QRunnable):
+    """Evaluates a step's deterministic check against the live UIA tree - fast, no AI call."""
+
+    def __init__(self, hwnd: int, kind: str, target, expected) -> None:
+        super().__init__()
+        self._hwnd = hwnd
+        self._kind = kind
+        self._target = target
+        self._expected = expected
+        self.signals = _LocalCheckSignals()
+
+    def run(self) -> None:
+        from apptutorial.accessibility.local_check import evaluate_check
+
+        try:
+            result = evaluate_check(self._hwnd, self._kind, self._target, self._expected)
+        except Exception:
+            result = None
+        self.signals.result.emit(result)
+
+
 class AppController(QObject):
     """Owns session state and drives capture -> identify -> menu -> plan -> guided steps."""
 
@@ -245,9 +272,16 @@ class AppController(QObject):
         self._baseline_fp = None
         self._prev_fp = None
         self._target_rect = None  # screen box of the current step's target element (if resolved)
+        # Deterministic local-check path (hybrid verification): poll UIA state for checkable
+        # steps; fall back to AI only when the local check can't determine the answer.
+        self._ai_fallback = False
+        self._local_none_count = 0
+        self._local_in_flight = False
+        self._local_for_index = -1  # which step the in-flight local check is judging
         self._watch_task: _WatchTask | None = None
         self._verify_task: _VerifyTask | None = None
         self._resolve_task: _ResolveTask | None = None
+        self._local_task: _LocalCheckTask | None = None
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._WATCH_INTERVAL_MS)
         self._watch_timer.timeout.connect(self._tick)
@@ -409,12 +443,18 @@ class AppController(QObject):
         self._awaiting_next = False
         self._completed = False
         self._target_rect = None
+        self._ai_fallback = False
+        self._local_none_count = 0
+        self._local_in_flight = False
         self._guiding = True
         if self._window_info is not None:
             w = self._window_info
+            check = getattr(step, "check", None)
+            check_desc = f"{check.kind}:{check.expected or check.target}" if check else "visual"
             print(
                 f"[step {index + 1}/{len(self._steps)}] watching '{w.title}' "
-                f"({w.process_name or '?'}, hwnd={w.hwnd}): {step.instruction}",
+                f"({w.process_name or '?'}, hwnd={w.hwnd}) [check={check_desc}]: "
+                f"{step.instruction}",
                 flush=True,
             )
             self._resolve_target(index, step)
@@ -446,6 +486,15 @@ class AppController(QObject):
         self._awaiting_next = False
         self._watch_timer.stop()
 
+    def _deterministic_check(self):
+        """Return the current step's StepCheck if it can be verified locally, else None."""
+        if not self._steps:
+            return None
+        check = getattr(self._steps[self._step_index], "check", None)
+        if check is None or check.kind in (None, "", "visual"):
+            return None
+        return check
+
     def _tick(self) -> None:
         if (
             not self._guiding
@@ -455,6 +504,22 @@ class AppController(QObject):
             or self._window_info is None
         ):
             return
+
+        # Hybrid verification: for a checkable step, poll UIA state locally (fast, no AI).
+        check = self._deterministic_check()
+        if check is not None and not self._ai_fallback:
+            if not self._local_in_flight:
+                self._local_in_flight = True
+                self._local_for_index = self._step_index
+                task = _LocalCheckTask(
+                    self._window_info.hwnd, check.kind, check.target, check.expected
+                )
+                task.signals.result.connect(self._on_local_check)
+                self._local_task = task
+                QThreadPool.globalInstance().start(task)
+            return
+
+        # AI path: fingerprint the screen and verify on a real change or the periodic heartbeat.
         self._ticks_since_verify += 1
         if self._ticks_since_verify >= self._PERIODIC_VERIFY_TICKS:
             print("[watch] periodic check", flush=True)
@@ -467,6 +532,36 @@ class AppController(QObject):
         task.signals.result.connect(self._on_watch)
         self._watch_task = task
         QThreadPool.globalInstance().start(task)
+
+    def _on_local_check(self, result) -> None:
+        self._local_in_flight = False
+        self._local_task = None
+        # Ignore a result that arrives after the user manually moved to another step.
+        if (
+            not self._guiding
+            or self.paused
+            or self._awaiting_next
+            or self._local_for_index != self._step_index
+        ):
+            return
+        if result is True:
+            print(f"[local] step {self._step_index + 1}: done", flush=True)
+            self._mark_step_done()
+            return
+        if result is None:
+            # Can't determine locally a few times running -> hand this step to the AI.
+            self._local_none_count += 1
+            if self._local_none_count >= 3:
+                print(
+                    f"[local] step {self._step_index + 1}: undetermined -> AI fallback",
+                    flush=True,
+                )
+                self._ai_fallback = True
+                self._baseline_fp = None
+                self._prev_fp = None
+                self._ticks_since_verify = 0
+            return
+        self.window.set_step_status("Watching your screen…")
 
     def _on_watch(self, fingerprint) -> None:
         self._watch_in_flight = False

@@ -46,6 +46,50 @@ class Target(BaseModel):
     )
 
 
+class StepCheck(BaseModel):
+    """A machine-checkable completion condition, evaluated locally via UI Automation.
+
+    Lets the fast step-check run without the AI for well-defined UI states; ``visual`` falls
+    back to the vision model. Produced by the planner (which understands the step) so the tight
+    verification loop can stay deterministic.
+    """
+
+    kind: Literal[
+        "element_selected",
+        "element_focused",
+        "element_present",
+        "cell_selected",
+        "checkbox_checked",
+        "value_equals",
+        "visual",
+    ] = Field(
+        default="visual",
+        description=(
+            "How completion can be checked. 'cell_selected': a spreadsheet cell/range is "
+            "selected (put the reference in 'expected', e.g. 'B5'). 'element_selected': a "
+            "tab/item becomes selected (name in 'target'). 'element_present': a dialog/pane/"
+            "window appears (its title in 'target'). 'element_focused': a field gains focus "
+            "(name in 'target'). 'checkbox_checked': a checkbox/toggle turns on (name in "
+            "'target'). 'value_equals': a control shows a value (name in 'target', value in "
+            "'expected'). 'visual': anything else - judged from the screenshot."
+        ),
+    )
+    target: str | None = Field(
+        default=None,
+        description=(
+            "Accessibility name of the element to check (tab/dialog/field/checkbox), usually "
+            "the same as the step's target uia_name_hint. Null for 'cell_selected' and 'visual'."
+        ),
+    )
+    expected: str | None = Field(
+        default=None,
+        description=(
+            "For 'cell_selected': the cell/range reference, e.g. 'B5'. For 'value_equals': the "
+            "expected value. Null otherwise."
+        ),
+    )
+
+
 class TutorialStep(BaseModel):
     index: int = Field(description="0-based step number.")
     instruction: str = Field(
@@ -70,6 +114,10 @@ class TutorialStep(BaseModel):
     done_signals: list[str] = Field(
         default_factory=list,
         description="1-3 concrete things visible on screen once the step is done.",
+    )
+    check: StepCheck = Field(
+        default_factory=StepCheck,
+        description="How to verify completion locally; defaults to visual (AI) when unsure.",
     )
 
 

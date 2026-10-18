@@ -40,6 +40,18 @@ understands SUM."
 - target: the element to act on; set uia_name_hint to its exact accessibility label and \
 uia_role_hint to its control type when they appear in the element list, else null.
 - done_signals: 1-3 concrete things visible on screen once the step is done.
+- check: a machine-checkable completion condition so the step can be verified WITHOUT the AI \
+whenever possible. Pick the most specific kind that fits and fill its fields:
+    - "cell_selected" when the step selects a spreadsheet cell/range - put the reference (e.g. \
+"B5") in expected, leave target null.
+    - "element_selected" when a tab or item becomes selected - put its exact name in target.
+    - "element_present" when a dialog, pane, or window appears - put its title in target.
+    - "element_focused" when a field/box gains focus - put its name in target.
+    - "checkbox_checked" when a checkbox/toggle turns on - put its name in target.
+    - "value_equals" when a control should show a value - target = its name, expected = value.
+    - "visual" ONLY when none of the above fit (needs looking at the screen).
+  Prefer a concrete kind over "visual" when the done state is a selection, a dialog, focus, a \
+toggle, or a cell - those are the common, reliably checkable cases.
 
 Keep steps atomic (one action each) and the plan focused (usually 3-10 steps). Number steps \
 from 0. If the goal isn't reachable from what's visible, give the best next steps toward it."""
