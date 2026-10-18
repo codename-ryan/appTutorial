@@ -233,12 +233,18 @@ def main(argv: list[str] | None = None) -> int:
     if registered:
         print(f"  Hotkey: {config.hotkey}  - press it over any window to capture.")
     else:
+        if controller.hotkey.last_error == 1409:
+            hint = (
+                "another copy of appTutorial is probably still running and holding it - "
+                "quit that one, then relaunch"
+            )
+        else:
+            hint = "another app is using this combo - pick a free one in .env"
         print(
             f"  Hotkey: {config.hotkey} could NOT be registered "
-            f"(error {controller.hotkey.last_error}; 1409 = another app already uses it)."
+            f"(error {controller.hotkey.last_error}). {hint}."
         )
-        print("    -> Use the tray menu's 'Capture in 3s (for testing)', or pick a free")
-        print("       hotkey in .env, e.g.  APPTUTORIAL_HOTKEY=ctrl+alt+j")
+        print("    Meanwhile you can use the tray menu's 'Capture in 3s (for testing)'.")
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("  WARNING: no system tray detected - the menu/indicator may not appear.")
     if not controller.ai.available:
