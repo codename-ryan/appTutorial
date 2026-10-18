@@ -1,9 +1,10 @@
 """appTutorial entry point and session orchestrator.
 
-M4: hotkey -> capture -> read UI elements + identify the app -> show a tutorial menu
-(suggested tutorials or a typed goal) -> plan the steps with Claude Sonnet 5. Includes the
-sensitive-app denylist, tray capture indicator + pause, single-instance guard, and local
-per-call telemetry. M5 turns the plan into an interactive, verified step-by-step panel.
+Flow: hotkey -> capture the active window -> read UI elements + identify the app -> show a
+tutorial menu (suggested tutorials or a typed goal) -> plan the steps with Claude Sonnet 5 ->
+guide the user one step at a time, watching the screen locally and asking Claude Haiku to
+verify each step before advancing. Includes the sensitive-app denylist, tray capture
+indicator + pause, single-instance guard, and local per-call telemetry.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from apptutorial import __version__
 from apptutorial.accessibility.uia import format_elements
@@ -92,6 +93,72 @@ class _PlanTask(QRunnable):
             self.signals.done.emit(plan)
 
 
+class _WatchSignals(QObject):
+    result = Signal(object)  # fingerprint (list[int]) or None
+
+
+class _WatchTask(QRunnable):
+    """Re-reads the target window and fingerprints it - off the UI thread, no AI call.
+
+    Cheap perceptual hash used only to notice when the screen has changed and settled; the
+    screenshot never leaves this worker.
+    """
+
+    def __init__(self, hwnd: int) -> None:
+        super().__init__()
+        self._hwnd = hwnd
+        self.signals = _WatchSignals()
+
+    def run(self) -> None:
+        from apptutorial.capture.change_detector import fingerprint
+        from apptutorial.capture.screenshot import capture_window
+        from apptutorial.capture.window import window_info_for_hwnd
+
+        try:
+            window = window_info_for_hwnd(self._hwnd)
+            if window is None:
+                self.signals.result.emit(None)
+                return
+            shot = capture_window(window)
+            self.signals.result.emit(fingerprint(shot.png_bytes))
+        except Exception:  # a transient capture hiccup shouldn't kill the watch loop
+            self.signals.result.emit(None)
+
+
+class _VerifySignals(QObject):
+    done = Signal(object)  # StepVerification
+    failed = Signal(str)
+
+
+class _VerifyTask(QRunnable):
+    """Captures a fresh screenshot of the target window and asks Haiku if the step is done."""
+
+    def __init__(self, ai: AIClient, hwnd: int, step, app_name: str) -> None:
+        super().__init__()
+        self._ai = ai
+        self._hwnd = hwnd
+        self._step = step
+        self._app_name = app_name
+        self.signals = _VerifySignals()
+
+    def run(self) -> None:
+        from apptutorial.ai.verify import verify_step
+        from apptutorial.capture.screenshot import capture_window
+        from apptutorial.capture.window import window_info_for_hwnd
+
+        try:
+            window = window_info_for_hwnd(self._hwnd)
+            if window is None:
+                self.signals.failed.emit("target window not found")
+                return
+            shot = capture_window(window)
+            result = verify_step(self._ai, shot.png_bytes, self._step, self._app_name)
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+        else:
+            self.signals.done.emit(result)
+
+
 class AppController(QObject):
     """Owns session state and drives capture -> identify -> menu -> plan."""
 
@@ -109,6 +176,23 @@ class AppController(QObject):
         self._elements = None
         self._ident = None
 
+        # Interactive-step state (M5). The watch loop fingerprints the target window and only
+        # calls Haiku to verify once the screen has changed and settled.
+        self._plan = None
+        self._steps: list = []
+        self._step_index = 0
+        self._guiding = False
+        self._verifying = False
+        self._verify_step_index = -1  # which step the in-flight verify is judging
+        self._watch_in_flight = False
+        self._baseline_fp = None
+        self._prev_fp = None
+        self._watch_task: _WatchTask | None = None
+        self._verify_task: _VerifyTask | None = None
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(1200)
+        self._watch_timer.timeout.connect(self._tick)
+
         self.telemetry = TelemetryLogger(config.telemetry_path)
         self.ai = AIClient(config.anthropic_api_key, self.telemetry)
         self.backend: CaptureBackend = get_capture_backend()
@@ -121,6 +205,9 @@ class AppController(QObject):
         self.tray.quit_requested.connect(app.quit)
         self.hotkey.triggered.connect(self._on_hotkey)
         self.window.goal_chosen.connect(self._on_goal_chosen)
+        self.window.next_clicked.connect(self._on_next)
+        self.window.back_clicked.connect(self._on_back)
+        self.window.closed.connect(self._stop_guiding)  # closing the card ends the loop
         app.aboutToQuit.connect(self.hotkey.stop)  # unregister the global hotkey on exit
 
     def start(self) -> bool:
@@ -147,11 +234,20 @@ class AppController(QObject):
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
         self.tray.set_paused(paused)
+        if paused:
+            self._watch_timer.stop()
+        elif self._guiding:
+            # Resuming: re-baseline so a change made while paused doesn't false-trigger.
+            self._baseline_fp = None
+            self._prev_fp = None
+            self.window.set_step_status("Watching your screen…")
+            self._watch_timer.start()
 
     def trigger_capture(self) -> None:
         if self.paused:
             self.tray.notify("appTutorial", "Capture is paused.")
             return
+        self._stop_guiding()  # a fresh capture ends any tutorial in progress
         window = self.backend.active_window()
         if window is None:
             self.tray.notify("appTutorial", "No active window detected.")
@@ -221,11 +317,128 @@ class AppController(QObject):
 
     def _on_planned(self, plan) -> None:
         self._plan_task = None
-        self.window.show_plan(plan)
+        self._plan = plan
+        self._steps = list(plan.steps)
+        app_name = plan.app_name or (self._ident.app_name if self._ident else "the app")
+        self.window.begin_steps(plan.goal, app_name)
+        if not self._steps:
+            self.window.set_status("Claude didn't return any steps - try a different goal.")
+            return
+        self._start_step(0)
 
     def _on_plan_failed(self, message: str) -> None:
         self._plan_task = None
         self.window.set_status(f"Planning failed: {message}")
+
+    # --- interactive step loop (M5) -----------------------------------------------------
+    def _current_app_name(self) -> str:
+        if self._plan is not None and self._plan.app_name:
+            return self._plan.app_name
+        if self._ident is not None:
+            return self._ident.app_name
+        return self._window_info.process_name if self._window_info else "the app"
+
+    def _start_step(self, index: int) -> None:
+        self._step_index = index
+        step = self._steps[index]
+        self.window.show_step(step, index, len(self._steps))
+        # Re-baseline for the new step so its own screen state is the reference.
+        self._baseline_fp = None
+        self._prev_fp = None
+        self._guiding = True
+        if not self.paused:
+            self._watch_timer.start()
+
+    def _stop_guiding(self) -> None:
+        self._guiding = False
+        self._watch_timer.stop()
+
+    def _tick(self) -> None:
+        if (
+            not self._guiding
+            or self.paused
+            or self._watch_in_flight
+            or self._verifying
+            or self._window_info is None
+        ):
+            return
+        self._watch_in_flight = True
+        task = _WatchTask(self._window_info.hwnd)
+        task.signals.result.connect(self._on_watch)
+        self._watch_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _on_watch(self, fingerprint) -> None:
+        self._watch_in_flight = False
+        self._watch_task = None
+        if not self._guiding or self.paused or self._verifying or fingerprint is None:
+            return
+
+        from apptutorial.capture.change_detector import changed, settled
+
+        if self._baseline_fp is None:
+            self._baseline_fp = fingerprint
+            self._prev_fp = fingerprint
+            return
+
+        if changed(self._baseline_fp, fingerprint) and settled(self._prev_fp, fingerprint):
+            # Reset the baseline so we don't re-verify the same change until it moves again.
+            self._baseline_fp = fingerprint
+            self._prev_fp = fingerprint
+            self._trigger_verify()
+            return
+        self._prev_fp = fingerprint
+
+    def _trigger_verify(self) -> None:
+        if self._verifying or self._window_info is None or not self.ai.available:
+            return
+        self._verifying = True
+        self._verify_step_index = self._step_index
+        self.window.set_step_status("Checking…")
+        step = self._steps[self._step_index]
+        task = _VerifyTask(self.ai, self._window_info.hwnd, step, self._current_app_name())
+        task.signals.done.connect(self._on_verify)
+        task.signals.failed.connect(self._on_verify_failed)
+        self._verify_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _on_verify(self, result) -> None:
+        self._verifying = False
+        self._verify_task = None
+        # Ignore a result that arrives after the user manually moved to another step.
+        if not self._guiding or self._verify_step_index != self._step_index:
+            return
+        if result.status == "done" and result.confidence >= 0.5:
+            self._advance()
+            return
+        if result.status in ("not_done", "off_track") and result.hint:
+            self.window.show_hint(result.hint)
+        self.window.set_step_status("Watching your screen…")
+
+    def _on_verify_failed(self, message: str) -> None:
+        self._verifying = False
+        self._verify_task = None
+        if self._guiding:
+            self.window.set_step_status("Watching your screen… (last check failed)")
+
+    def _advance(self) -> None:
+        if self._step_index + 1 < len(self._steps):
+            self._start_step(self._step_index + 1)
+        else:
+            self._complete()
+
+    def _complete(self) -> None:
+        self._stop_guiding()
+        self.window.show_complete()
+
+    def _on_next(self) -> None:
+        if not self._guiding:
+            return
+        self._advance()
+
+    def _on_back(self) -> None:
+        if self._guiding and self._step_index > 0:
+            self._start_step(self._step_index - 1)
 
 
 def _run_hotkey_test() -> int:
@@ -313,9 +526,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="apptutorial", description="AI-powered on-screen software tutor"
     )
-    parser.add_argument(
-        "--version", action="version", version=f"apptutorial {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"apptutorial {__version__}")
     parser.add_argument(
         "--check",
         action="store_true",
@@ -349,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     controller = AppController(config, app)
 
     if args.check:
-        print(f"apptutorial {__version__} - M4 OK: capture + identify + menu + planning wired.")
+        print(f"apptutorial {__version__} - M5 OK: capture + identify + menu + plan + verify.")
         print(f"  api key present : {config.has_api_key}")
         print(f"  ai available    : {controller.ai.available}")
         print(f"  identify/plan   : {config.identify_model}")

@@ -36,12 +36,21 @@ def test_log_appends(tmp_path):
     path = tmp_path / "telemetry.jsonl"
     logger = TelemetryLogger(path)
     logger.log(
-        model="m", call_type="identify", input_tokens=1,
-        output_tokens=1, latency_ms=1, status="ok",
+        model="m",
+        call_type="identify",
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1,
+        status="ok",
     )
     logger.log(
-        model="m", call_type="verify", input_tokens=1,
-        output_tokens=1, latency_ms=1, status="error", step_index=2,
+        model="m",
+        call_type="verify",
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1,
+        status="error",
+        step_index=2,
     )
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2

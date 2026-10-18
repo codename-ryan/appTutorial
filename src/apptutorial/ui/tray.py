@@ -24,9 +24,7 @@ class TrayIcon(QObject):
     pause_toggled = Signal(bool)
     quit_requested = Signal()
 
-    def __init__(
-        self, app: QApplication, hotkey: str, parent: QObject | None = None
-    ) -> None:
+    def __init__(self, app: QApplication, hotkey: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._hotkey = hotkey
         self._active_icon = _square_icon("#2e7d32")  # green: listening
@@ -64,18 +62,14 @@ class TrayIcon(QObject):
     def set_paused(self, paused: bool) -> None:
         self._tray.setIcon(self._paused_icon if paused else self._active_icon)
         self._tray.setToolTip(
-            "appTutorial - paused"
-            if paused
-            else f"appTutorial - listening ({self._hotkey})"
+            "appTutorial - paused" if paused else f"appTutorial - listening ({self._hotkey})"
         )
         self._pause_action.blockSignals(True)
         self._pause_action.setChecked(paused)
         self._pause_action.blockSignals(False)
 
     def notify(self, title: str, message: str) -> None:
-        self._tray.showMessage(
-            title, message, QSystemTrayIcon.MessageIcon.Information, 3000
-        )
+        self._tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
 
     def show(self) -> None:
         self._tray.show()

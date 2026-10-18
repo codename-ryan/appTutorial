@@ -46,10 +46,9 @@ def _window_scale(hwnd: int) -> float:
     return (dpi / 96.0) if dpi else 1.0
 
 
-def get_active_window() -> WindowInfo | None:
-    """Return info about the focused window, or ``None`` if there isn't a usable one."""
-    hwnd = win32gui.GetForegroundWindow()
-    if not hwnd:
+def window_info_for_hwnd(hwnd: int) -> WindowInfo | None:
+    """Build a WindowInfo for a specific window handle (re-reads current bounds)."""
+    if not hwnd or not win32gui.IsWindow(hwnd):
         return None
 
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
@@ -77,3 +76,8 @@ def get_active_window() -> WindowInfo | None:
         height=height,
         scale_factor=_window_scale(hwnd),
     )
+
+
+def get_active_window() -> WindowInfo | None:
+    """Return info about the focused window, or ``None`` if there isn't a usable one."""
+    return window_info_for_hwnd(win32gui.GetForegroundWindow())

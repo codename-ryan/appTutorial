@@ -79,3 +79,19 @@ class TutorialPlan(BaseModel):
     steps: list[TutorialStep] = Field(
         default_factory=list, description="Ordered, atomic steps that achieve the goal."
     )
+
+
+class StepVerification(BaseModel):
+    status: Literal["done", "not_done", "off_track", "unclear"] = Field(
+        description=(
+            "'done' only if the step's done condition is clearly visible in the screenshot; "
+            "'not_done' if not yet; 'off_track' if the user went the wrong way; 'unclear' if "
+            "you cannot tell from the screenshot."
+        )
+    )
+    confidence: float = Field(description="0.0-1.0 confidence in the status.")
+    observation: str = Field(description="One sentence describing the relevant screen state.")
+    hint: str | None = Field(
+        default=None,
+        description="A one-sentence nudge toward completing the step (when not done/off track).",
+    )

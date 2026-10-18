@@ -1,9 +1,10 @@
-"""The main session window: capture -> identify -> tutorial menu -> plan.
+"""The main session window: capture -> identify -> tutorial menu -> interactive steps.
 
 A compact, frameless, always-on-top card docked to the top-right corner. It floats above the
 app you're working in (so it doesn't vanish when that app takes focus) and stays until you
 close it with the X. Draggable by its header. The screenshot is never shown or saved here.
-In M5 the plan view becomes the interactive one-step-at-a-time panel with screen verification.
+In M5 the plan view is the interactive one-step-at-a-time panel (StepPanel) that the
+orchestrator drives as it verifies each step against the live screen.
 """
 
 from __future__ import annotations
@@ -19,15 +20,15 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from apptutorial.ui.menu import TutorialMenu
+from apptutorial.ui.panel import StepPanel
 
 if TYPE_CHECKING:
-    from apptutorial.ai.schemas import AppIdentification, TutorialPlan
+    from apptutorial.ai.schemas import AppIdentification, TutorialStep
     from apptutorial.capture.backend import Screenshot, WindowInfo
 
 _STYLE = """
@@ -35,21 +36,31 @@ QFrame#card { background: #ffffff; border-radius: 14px; }
 QLabel { color: #1f2328; font-size: 13px; }
 QLabel#title { color: #2e7d32; font-weight: 600; font-size: 14px; }
 QLabel#status { color: #6a737d; }
+QLabel#progress { color: #8a929b; font-size: 12px; }
+QLabel#instruction { color: #1f2328; font-size: 15px; font-weight: 600; }
+QLabel#doneWhen { color: #2e7d32; }
+QLabel#why { color: #57606a; font-style: italic; }
+QLabel#hint { color: #8a6d00; background: #fff6d6; border: 1px solid #f0e2a8;
+              border-radius: 8px; padding: 6px 8px; }
+QLabel#stepStatus { color: #8a929b; font-size: 12px; }
 QPushButton { background: #f3f4f6; border: 1px solid #e2e4e8; border-radius: 8px;
               padding: 7px 10px; color: #1f2328; }
 QPushButton:hover { background: #e9ebef; }
+QPushButton:disabled { color: #b0b6bd; }
+QPushButton:checked { background: #e4ecff; border-color: #c2d4ff; }
 QPushButton#tutorialBtn { text-align: left; }
 QPushButton#close { background: transparent; border: none; color: #6a737d; font-size: 15px; }
 QPushButton#close:hover { background: #eceef1; border-radius: 13px; color: #1f2328; }
 QLineEdit { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
             border-radius: 8px; padding: 6px 8px; }
-QScrollArea { border: none; background: transparent; }
-QScrollArea > QWidget { background: transparent; }
 """
 
 
 class SessionWindow(QWidget):
     goal_chosen = Signal(str)
+    next_clicked = Signal()
+    back_clicked = Signal()
+    closed = Signal()
     _HEADER_BAND = 48  # top strip (px) that acts as a drag handle
 
     def __init__(self) -> None:
@@ -90,7 +101,7 @@ class SessionWindow(QWidget):
         close_btn.setObjectName("close")
         close_btn.setFixedSize(26, 26)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.clicked.connect(self.hide)
+        close_btn.clicked.connect(self._close)
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(close_btn)
@@ -105,23 +116,18 @@ class SessionWindow(QWidget):
         self._menu = TutorialMenu()
         self._menu.goal_chosen.connect(self.goal_chosen)
 
-        self._plan = QLabel()
-        self._plan.setWordWrap(True)
-        self._plan.setTextFormat(Qt.TextFormat.RichText)
-        self._plan.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._plan.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._plan_scroll = QScrollArea()
-        self._plan_scroll.setWidgetResizable(True)
-        self._plan_scroll.setWidget(self._plan)
+        self._panel = StepPanel()
+        self._panel.next_clicked.connect(self.next_clicked)
+        self._panel.back_clicked.connect(self.back_clicked)
 
         layout.addWidget(self._appline)
         layout.addWidget(self._status)
         layout.addWidget(self._menu)
-        layout.addWidget(self._plan_scroll, 1)
+        layout.addWidget(self._panel, 1)
 
         self.setStyleSheet(_STYLE)
         self._menu.hide()
-        self._plan_scroll.hide()
+        self._panel.hide()
 
     # --- frameless window dragging (via the header strip) -------------------------------
     def mousePressEvent(self, event) -> None:
@@ -141,6 +147,10 @@ class SessionWindow(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         self._drag_offset = None
+
+    def _close(self) -> None:
+        self.hide()
+        self.closed.emit()  # let the controller stop any running step/verify loop
 
     # --- placement / show ---------------------------------------------------------------
     def _place_top_right(self) -> None:
@@ -162,12 +172,10 @@ class SessionWindow(QWidget):
         self._status.setText(text)
 
     def show_analyzing(self, window: WindowInfo, screenshot: Screenshot) -> None:
-        self._appline.setText(
-            f"<b>Analyzing {window.process_name or 'the active window'}…</b>"
-        )
+        self._appline.setText(f"<b>Analyzing {window.process_name or 'the active window'}…</b>")
         self._status.setText("Reading the screen…")
         self._menu.hide()
-        self._plan_scroll.hide()
+        self._panel.hide()
         self._raise()
 
     def show_menu(self, ident: AppIdentification, element_count: int) -> None:
@@ -179,7 +187,7 @@ class SessionWindow(QWidget):
         )
         self._status.setText("")
         self._menu.set_identification(ident)
-        self._plan_scroll.hide()
+        self._panel.hide()
         self._menu.show()
         self._raise()
 
@@ -193,29 +201,29 @@ class SessionWindow(QWidget):
         self._set_tutorial_header(goal)
         self._status.setText("Planning your steps…")
         self._menu.hide()
-        self._plan_scroll.hide()
+        self._panel.hide()
 
-    def show_plan(self, plan: TutorialPlan) -> None:
+    # --- interactive steps (M5) ---------------------------------------------------------
+    def begin_steps(self, goal: str, app_name: str) -> None:
+        """Switch the card into step mode once a plan is ready."""
         if not self._app_name:
-            self._app_name = plan.app_name
-        self._set_tutorial_header(plan.goal)
+            self._app_name = app_name
+        self._set_tutorial_header(goal)
         self._status.setText("")
-        parts: list[str] = []
-        for step in plan.steps:
-            parts.append(
-                f"<div style='margin:10px 0 2px'><b>{step.index + 1}. {step.instruction}</b></div>"
-            )
-            parts.append(
-                f"<div style='margin-left:12px;color:#57606a'>"
-                f"target: {step.target.description}</div>"
-            )
-            parts.append(
-                f"<div style='margin-left:12px;color:#2e7d32'>"
-                f"done when: {step.done_when}</div>"
-            )
-        if not plan.steps:
-            parts.append("<div>(no steps returned)</div>")
-        self._plan.setText("".join(parts))
         self._menu.hide()
-        self._plan_scroll.show()
+        self._panel.show()
         self._raise()
+
+    def show_step(self, step: TutorialStep, index: int, total: int) -> None:
+        self._panel.show_step(step, index, total)
+        self._panel.show()
+        self._raise()
+
+    def set_step_status(self, text: str) -> None:
+        self._panel.set_status(text)
+
+    def show_hint(self, text: str) -> None:
+        self._panel.show_hint(text)
+
+    def show_complete(self) -> None:
+        self._panel.show_complete()

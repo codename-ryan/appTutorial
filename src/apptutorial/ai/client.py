@@ -50,9 +50,7 @@ class AIClient:
         Raises AIError on any failure. Always records a telemetry event.
         """
         if self._client is None:
-            raise AIError(
-                "No ANTHROPIC_API_KEY configured. Add it to .env to enable AI features."
-            )
+            raise AIError("No ANTHROPIC_API_KEY configured. Add it to .env to enable AI features.")
 
         kwargs: dict[str, Any] = {
             "model": model,
