@@ -12,8 +12,8 @@ import io
 from PIL import Image
 
 _SIZE = 32  # 32x32 grayscale -> 1024-bit average hash
-CHANGE_BITS = 30  # >= this many differing bits vs the baseline => the screen changed
-STABLE_BITS = 14  # < this many differing bits vs the previous frame => the screen settled
+CHANGE_BITS = 18  # >= this many differing bits vs the baseline => the screen changed
+STABLE_BITS = 12  # < this many differing bits vs the previous frame => the screen settled
 
 
 def fingerprint(png_bytes: bytes) -> list[int]:

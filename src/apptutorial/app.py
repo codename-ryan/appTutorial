@@ -160,7 +160,11 @@ class _VerifyTask(QRunnable):
 
 
 class AppController(QObject):
-    """Owns session state and drives capture -> identify -> menu -> plan."""
+    """Owns session state and drives capture -> identify -> menu -> plan -> guided steps."""
+
+    # Verify at least this often (in watch ticks) even if no screen change is detected, so a
+    # step still advances when the change is too subtle for the local fingerprint to catch.
+    _PERIODIC_VERIFY_TICKS = 6  # ~7s at the 1200ms tick interval
 
     def __init__(self, config: Config, app, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -185,6 +189,7 @@ class AppController(QObject):
         self._verifying = False
         self._verify_step_index = -1  # which step the in-flight verify is judging
         self._watch_in_flight = False
+        self._ticks_since_verify = 0  # safety net: verify periodically even without a change
         self._baseline_fp = None
         self._prev_fp = None
         self._watch_task: _WatchTask | None = None
@@ -345,7 +350,15 @@ class AppController(QObject):
         # Re-baseline for the new step so its own screen state is the reference.
         self._baseline_fp = None
         self._prev_fp = None
+        self._ticks_since_verify = 0
         self._guiding = True
+        if self._window_info is not None:
+            w = self._window_info
+            print(
+                f"[step {index + 1}/{len(self._steps)}] watching '{w.title}' "
+                f"({w.process_name or '?'}, hwnd={w.hwnd}): {step.instruction}",
+                flush=True,
+            )
         if not self.paused:
             self._watch_timer.start()
 
@@ -354,13 +367,14 @@ class AppController(QObject):
         self._watch_timer.stop()
 
     def _tick(self) -> None:
-        if (
-            not self._guiding
-            or self.paused
-            or self._watch_in_flight
-            or self._verifying
-            or self._window_info is None
-        ):
+        if not self._guiding or self.paused or self._verifying or self._window_info is None:
+            return
+        self._ticks_since_verify += 1
+        if self._ticks_since_verify >= self._PERIODIC_VERIFY_TICKS:
+            print("[watch] periodic check", flush=True)
+            self._trigger_verify()
+            return
+        if self._watch_in_flight:
             return
         self._watch_in_flight = True
         task = _WatchTask(self._window_info.hwnd)
@@ -374,7 +388,7 @@ class AppController(QObject):
         if not self._guiding or self.paused or self._verifying or fingerprint is None:
             return
 
-        from apptutorial.capture.change_detector import changed, settled
+        from apptutorial.capture.change_detector import changed, difference, settled
 
         if self._baseline_fp is None:
             self._baseline_fp = fingerprint
@@ -382,6 +396,11 @@ class AppController(QObject):
             return
 
         if changed(self._baseline_fp, fingerprint) and settled(self._prev_fp, fingerprint):
+            print(
+                f"[watch] screen changed ({difference(self._baseline_fp, fingerprint)} bits)"
+                " -> checking",
+                flush=True,
+            )
             # Reset the baseline so we don't re-verify the same change until it moves again.
             self._baseline_fp = fingerprint
             self._prev_fp = fingerprint
@@ -394,6 +413,7 @@ class AppController(QObject):
             return
         self._verifying = True
         self._verify_step_index = self._step_index
+        self._ticks_since_verify = 0
         self.window.set_step_status("Checking…")
         step = self._steps[self._step_index]
         task = _VerifyTask(self.ai, self._window_info.hwnd, step, self._current_app_name())
@@ -405,6 +425,11 @@ class AppController(QObject):
     def _on_verify(self, result) -> None:
         self._verifying = False
         self._verify_task = None
+        print(
+            f"[verify] step {self._verify_step_index + 1}: {result.status} "
+            f"(conf {result.confidence:.2f}) - {result.observation}",
+            flush=True,
+        )
         # Ignore a result that arrives after the user manually moved to another step.
         if not self._guiding or self._verify_step_index != self._step_index:
             return
@@ -418,6 +443,7 @@ class AppController(QObject):
     def _on_verify_failed(self, message: str) -> None:
         self._verifying = False
         self._verify_task = None
+        print(f"[verify] failed: {message}", flush=True)
         if self._guiding:
             self.window.set_step_status("Watching your screen… (last check failed)")
 

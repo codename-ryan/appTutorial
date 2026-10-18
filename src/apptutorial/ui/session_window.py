@@ -72,10 +72,14 @@ class SessionWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Never grab the foreground when shown, so capturing the "active window" keeps
+        # targeting the app being taught (e.g. Excel), not this card.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.resize(360, 540)
         self._placed = False
         self._drag_offset = None
         self._app_name = ""
+        self._capture_excluded = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 14, 14, 14)  # room for the drop shadow
@@ -151,6 +155,15 @@ class SessionWindow(QWidget):
     def _close(self) -> None:
         self.hide()
         self.closed.emit()  # let the controller stop any running step/verify loop
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Keep the tutor card out of every screenshot we take of the target app.
+        if not self._capture_excluded:
+            from apptutorial.capture.window import exclude_from_capture
+
+            self._capture_excluded = exclude_from_capture(int(self.winId()))
+            print(f"[window] hidden from screen capture: {self._capture_excluded}", flush=True)
 
     # --- placement / show ---------------------------------------------------------------
     def _place_top_right(self) -> None:
