@@ -54,6 +54,12 @@ def cell_rect(ref: str) -> tuple[int, int, int, int] | None:
         app = win32com.client.GetActiveObject("Excel.Application")
         cell = app.Range(ref)
         win = app.ActiveWindow
+        # Hide the highlight when the cell has scrolled out of the visible grid.
+        try:
+            if app.Intersect(cell, win.VisibleRange) is None:
+                return None
+        except Exception:
+            pass
         left = win.PointsToScreenPixelsX(cell.Left)
         top = win.PointsToScreenPixelsY(cell.Top)
         right = win.PointsToScreenPixelsX(cell.Left + cell.Width)

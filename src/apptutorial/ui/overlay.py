@@ -3,8 +3,9 @@
 A frameless, always-on-top, click-through window that draws a glowing frame around the step's
 target (a ribbon control via UIA, or a cell via Excel COM). It never steals focus and is
 excluded from screen capture, so clicks pass through to the app and the frame never appears in
-the screenshots we send to the models. Target boxes arrive in physical pixels and are converted
-to Qt's logical coordinates with the window's DPI scale (SPEC.md §6, §9).
+the screenshots we send to the models. Target boxes arrive in physical pixels and the window is
+placed with Win32 SetWindowPos (physical), bypassing Qt's logical-coordinate/DPI transform so
+it lines up exactly under mixed-DPI / multi-monitor setups (SPEC.md §6, §9).
 """
 
 from __future__ import annotations
@@ -31,21 +32,19 @@ class HighlightOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self._capture_excluded = False
 
-    def show_box(self, rect_physical: tuple[int, int, int, int], scale: float) -> None:
-        """Frame a target given its screen box in physical pixels and the monitor's DPI scale."""
-        left, top, width, height = rect_physical
-        s = scale or 1.0
-        gx = int(left / s) - self._MARGIN
-        gy = int(top / s) - self._MARGIN
-        gw = int(width / s) + 2 * self._MARGIN
-        gh = int(height / s) + 2 * self._MARGIN
-        self.setGeometry(gx, gy, gw, gh)
-        if not self._capture_excluded:
-            from apptutorial.capture.window import exclude_from_capture
+    def show_box(self, rect_physical: tuple[int, int, int, int]) -> None:
+        """Frame a target given its screen box in physical pixels (placed via Win32, exactly)."""
+        from apptutorial.capture.window import exclude_from_capture, move_window_physical
 
+        left, top, width, height = rect_physical
+        x = left - self._MARGIN
+        y = top - self._MARGIN
+        w = width + 2 * self._MARGIN
+        h = height + 2 * self._MARGIN
+        self.show()  # ensure the native window exists before we move it
+        if not self._capture_excluded:
             self._capture_excluded = exclude_from_capture(int(self.winId()))
-        self.show()
-        self.raise_()
+        move_window_physical(int(self.winId()), x, y, w, h)
         self.update()
 
     def hide_box(self) -> None:

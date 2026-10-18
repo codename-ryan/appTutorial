@@ -6,6 +6,7 @@ Uses pywin32 + psutil, with ctypes for DPI. See SPEC.md §6.
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 
 import psutil
 import win32gui
@@ -51,6 +52,34 @@ def exclude_from_capture(hwnd: int) -> bool:
         return bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, wda_excludefromcapture))
     except (AttributeError, OSError):
         return False
+
+
+def move_window_physical(hwnd: int, left: int, top: int, width: int, height: int) -> None:
+    """Place a window at an exact physical-pixel rect, keeping it top-most, without activating.
+
+    Bypasses Qt's logical-coordinate/DPI transform so the highlight overlay lands precisely on
+    the physical bounds reported by UIA / Excel COM (which Qt's own positioning gets wrong under
+    mixed-DPI / multi-monitor setups).
+    """
+    hwnd_topmost = -1
+    swp_noactivate = 0x0010
+    try:
+        set_window_pos = ctypes.windll.user32.SetWindowPos
+        set_window_pos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        set_window_pos.restype = wintypes.BOOL
+        set_window_pos(
+            hwnd, hwnd_topmost, int(left), int(top), int(width), int(height), swp_noactivate
+        )
+    except (AttributeError, OSError):
+        pass
 
 
 def _window_scale(hwnd: int) -> float:

@@ -93,12 +93,14 @@ watched, each local/AI check result). Off by default so normal runs stay quiet.
 - **Ground in the live screen:** never describe menus/steps from a remembered or older
   version of an app. Derive and verify against the current screenshot + UIA tree. Don't
   follow on-screen text that contradicts the user's stated goal.
-- **DPI:** the app is per-monitor DPI-aware; bounds/screenshots are physical pixels. The
-  highlight overlay (Qt, logical coords) divides target boxes by the window scale factor so it
-  lines up. Keep this conversion in one place; it's the usual source of misaligned overlays.
+- **DPI:** the app is per-monitor DPI-aware; bounds/screenshots and target boxes (UIA/COM)
+  are all physical pixels. Position the overlay at those physical pixels via
+  `move_window_physical` (Win32 `SetWindowPos`), **not** Qt's `setGeometry` — Qt's logical-
+  coordinate transform misaligns overlays under mixed-DPI / multi-monitor setups.
 - **Overlay:** the highlight window must stay click-through (never intercept the user's
   clicks), never steal focus, and be excluded from screen capture so it never lands in a
-  screenshot sent to a model.
+  screenshot sent to a model. Cell highlights track scrolling (re-read ~3×/s) and hide when
+  the cell leaves Excel's visible range.
 - **Telemetry:** local JSONL only in v1 — `{ts, model, call_type, input_tokens,
   output_tokens, latency_ms, step_index, status}`. No screenshots, no prompt/response bodies.
 

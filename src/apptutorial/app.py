@@ -217,17 +217,41 @@ class _ResolveTask(QRunnable):
         rect = None
         try:
             check = getattr(self._step, "check", None)
-            if check is not None and check.kind in ("cell_selected", "cell_value") and check.target:
+            is_cell = (
+                check is not None
+                and check.kind in ("cell_selected", "cell_value")
+                and bool(check.target)
+            )
+            if is_cell:
                 from apptutorial.accessibility.excel_com import cell_rect
 
-                rect = cell_rect(check.target)
-            if rect is None:
+                rect = cell_rect(check.target)  # cell steps: COM only, never a stray element
+            else:
                 target = self._step.target
                 hint = target.uia_name_hint if target else None
                 if hint:
                     from apptutorial.accessibility.uia import find_element_rect
 
                     rect = find_element_rect(self._hwnd, hint, target.uia_role_hint)
+        except Exception:
+            rect = None
+        self.signals.resolved.emit(self._step_index, rect)
+
+
+class _CellRectTask(QRunnable):
+    """Re-reads a cell's screen box (Excel COM) so the highlight can track scrolling."""
+
+    def __init__(self, step_index: int, ref: str) -> None:
+        super().__init__()
+        self._step_index = step_index
+        self._ref = ref
+        self.signals = _ResolveSignals()
+
+    def run(self) -> None:
+        from apptutorial.accessibility.excel_com import cell_rect
+
+        try:
+            rect = cell_rect(self._ref)
         except Exception:
             rect = None
         self.signals.resolved.emit(self._step_index, rect)
@@ -304,13 +328,19 @@ class AppController(QObject):
         self._local_none_count = 0
         self._local_in_flight = False
         self._local_for_index = -1  # which step the in-flight local check is judging
+        self._overlay_in_flight = False
         self._watch_task: _WatchTask | None = None
         self._verify_task: _VerifyTask | None = None
         self._resolve_task: _ResolveTask | None = None
         self._local_task: _LocalCheckTask | None = None
+        self._cell_rect_task: _CellRectTask | None = None
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._WATCH_INTERVAL_MS)
         self._watch_timer.timeout.connect(self._tick)
+        # Cell highlights must follow scrolling, so re-read the cell's screen box frequently.
+        self._overlay_timer = QTimer(self)
+        self._overlay_timer.setInterval(300)
+        self._overlay_timer.timeout.connect(self._refresh_overlay)
 
         self.telemetry = TelemetryLogger(config.telemetry_path)
         self.ai = AIClient(config.anthropic_api_key, self.telemetry)
@@ -357,6 +387,7 @@ class AppController(QObject):
         self.tray.set_paused(paused)
         if paused:
             self._watch_timer.stop()
+            self._overlay_timer.stop()
             self.overlay.hide_box()
         elif self._guiding and not self._awaiting_next:
             # Resuming: re-baseline so a change made while paused doesn't false-trigger.
@@ -365,6 +396,8 @@ class AppController(QObject):
             self.window.set_step_status("Watching your screen…")
             self._show_overlay()
             self._watch_timer.start()
+            if self._is_cell_step():
+                self._overlay_timer.start()
 
     def trigger_capture(self) -> None:
         if self.paused:
@@ -497,6 +530,11 @@ class AppController(QObject):
             self._resolve_target(index, step)
         if not self.paused:
             self._watch_timer.start()
+            # Cell targets scroll with the sheet, so keep re-reading their position.
+            if self._is_cell_step():
+                self._overlay_timer.start()
+            else:
+                self._overlay_timer.stop()
 
     def _resolve_target(self, index: int, step) -> None:
         """Resolve the step's target box (cell via COM or control via UIA) off the UI thread.
@@ -525,17 +563,50 @@ class AppController(QObject):
     def _show_overlay(self) -> None:
         if (
             self._target_rect is not None
-            and self._window_info is not None
             and self._guiding
             and not self._awaiting_next
             and not self.paused
         ):
-            self.overlay.show_box(self._target_rect, self._window_info.scale_factor)
+            self.overlay.show_box(self._target_rect)
+
+    def _is_cell_step(self) -> bool:
+        check = getattr(self._steps[self._step_index], "check", None) if self._steps else None
+        return bool(check and check.kind in ("cell_selected", "cell_value") and check.target)
+
+    def _refresh_overlay(self) -> None:
+        """Re-read the current cell's screen box so the highlight tracks scrolling."""
+        if (
+            not self._guiding
+            or self.paused
+            or self._awaiting_next
+            or self._overlay_in_flight
+            or self._window_info is None
+            or not self._is_cell_step()
+        ):
+            return
+        ref = self._steps[self._step_index].check.target
+        self._overlay_in_flight = True
+        task = _CellRectTask(self._step_index, ref)
+        task.signals.resolved.connect(self._on_overlay_rect)
+        self._cell_rect_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _on_overlay_rect(self, index: int, rect) -> None:
+        self._overlay_in_flight = False
+        self._cell_rect_task = None
+        if not self._guiding or index != self._step_index or self._awaiting_next or self.paused:
+            return
+        self._target_rect = rect
+        if rect is None:
+            self.overlay.hide_box()  # cell scrolled out of view
+        else:
+            self.overlay.show_box(rect)
 
     def _stop_guiding(self) -> None:
         self._guiding = False
         self._awaiting_next = False
         self._watch_timer.stop()
+        self._overlay_timer.stop()
         self.overlay.hide_box()
 
     def _deterministic_check(self):
@@ -682,6 +753,7 @@ class AppController(QObject):
         """Step looks complete: stop watching and let the user confirm with the green button."""
         self._awaiting_next = True
         self._watch_timer.stop()
+        self._overlay_timer.stop()
         self.overlay.hide_box()  # step done; drop the highlight while awaiting confirmation
         is_last = self._step_index + 1 >= len(self._steps)
         self.window.show_step_done(is_last)
@@ -709,6 +781,7 @@ class AppController(QObject):
         self._completed = False
         self._guiding = False
         self._awaiting_next = False
+        self._overlay_timer.stop()
         self.overlay.hide_box()
         if self._ident is not None:
             self.window.show_menu(self._ident, len(self._elements) if self._elements else 0)

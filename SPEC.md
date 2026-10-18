@@ -95,7 +95,9 @@ that is always grounded in the current screenshot — never a remembered or outd
     models to improve identification, planning, and verification accuracy.
 11. **See-through highlight overlay** framing the current step's target — a cell (via Excel
     COM point→pixel conversion) or a control (via UIA bounds). Click-through, never steals
-    focus, excluded from screen capture, and DPI-aligned (physical bounds ÷ scale factor).
+    focus, excluded from screen capture, and placed at exact physical pixels via Win32
+    `SetWindowPos` (bypasses Qt's DPI transform). Cell highlights re-read position to **track
+    scrolling** and hide when the cell leaves the visible grid.
 12. Local JSONL telemetry: per-call model, token usage, latency, step index. No screenshots,
     no prompt bodies.
 13. First deeply-tested target app: **Microsoft Excel** (others still work generically).
@@ -211,9 +213,10 @@ appTutorial/
 2. **Active window** via `GetForegroundWindow`; **process name** via
    `GetWindowThreadProcessId` + `psutil`; **window rect** via `GetWindowRect`.
 3. **DPI / scale factor:** the app is per-monitor DPI-aware. Window bounds and screenshots
-   are captured in physical pixels and divided by the monitor scale factor so logical
-   coordinates line up for later overlay work. This is the single most common source of
-   misaligned overlays and is handled centrally in the capture layer, not per-feature.
+   are captured in physical pixels. Element/cell target boxes (UIA bounds, Excel COM) are also
+   physical, and the highlight overlay is positioned at those exact physical pixels via Win32
+   `SetWindowPos` — deliberately bypassing Qt's logical-coordinate/DPI transform, which is the
+   single most common source of misaligned overlays under mixed-DPI / multi-monitor setups.
 4. **Screenshot:** only the active window region is captured (never the full desktop or
    background windows), via `mss` or `PrintWindow`, encoded to PNG → base64 for the vision
    call. Held in memory only; never written to disk or logs.
