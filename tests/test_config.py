@@ -8,7 +8,7 @@ def test_load_config_defaults(monkeypatch):
 
     cfg = load_config()
 
-    assert cfg.hotkey == "ctrl+alt+t"
+    assert cfg.hotkey == "ctrl+shift+t"
     assert cfg.denylist == DEFAULT_DENYLIST
     assert cfg.identify_model == "claude-sonnet-5"
     assert cfg.verify_model == "claude-haiku-4-5"

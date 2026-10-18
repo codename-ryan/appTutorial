@@ -15,7 +15,9 @@ from dotenv import load_dotenv
 IDENTIFY_MODEL = "claude-sonnet-5"  # app ID, tutorial planning, answering questions
 VERIFY_MODEL = "claude-haiku-4-5"  # fast "did they do the step?" check
 
-DEFAULT_HOTKEY = "ctrl+alt+t"
+# Ctrl+Shift (not Ctrl+Alt): on many keyboard layouts Windows treats Ctrl+Alt as AltGr,
+# so Ctrl+Alt hotkeys register but never fire. Ctrl+Shift is reliable.
+DEFAULT_HOTKEY = "ctrl+shift+t"
 
 # Sensitive apps where capture auto-disables (matched on lowercased process name).
 DEFAULT_DENYLIST: tuple[str, ...] = (

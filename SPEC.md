@@ -190,9 +190,11 @@ appTutorial/
 
 ## 6. Capture pipeline
 
-1. **Hotkey** (configurable; default `Ctrl+Alt+T`) registered globally via the Win32
+1. **Hotkey** (configurable; default `Ctrl+Shift+T`) registered globally via the Win32
    `RegisterHotKey` API, so the OS routes it to appTutorial and suppresses it from the
-   foreground app (it won't also trigger the app's own shortcut).
+   foreground app (it won't also trigger the app's own shortcut). `Ctrl+Alt+*` is avoided
+   because many keyboard layouts treat Ctrl+Alt as AltGr, so those hotkeys register but
+   never fire.
 2. **Active window** via `GetForegroundWindow`; **process name** via
    `GetWindowThreadProcessId` + `psutil`; **window rect** via `GetWindowRect`.
 3. **DPI / scale factor:** the app is per-monitor DPI-aware. Window bounds and screenshots

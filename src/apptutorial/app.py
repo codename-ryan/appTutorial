@@ -173,6 +173,63 @@ def _acquire_single_instance_lock():
     return handle
 
 
+def _run_hotkey_test() -> int:
+    """Register several candidate global hotkeys and print which ones actually fire.
+
+    Diagnostic only. Registers via the same thread-message + native-filter path the real app
+    uses, so a combo that fires here will fire in the app. Auto-exits after 30s.
+    """
+    import ctypes
+    import signal
+    from ctypes import wintypes
+
+    from PySide6.QtCore import QAbstractNativeEventFilter, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    wm_hotkey = 0x0312
+    mod_alt, mod_control, mod_shift, mod_norepeat = 0x1, 0x2, 0x4, 0x4000
+    candidates = [
+        (1, "ctrl+alt+t", mod_control | mod_alt | mod_norepeat, ord("T")),
+        (2, "ctrl+shift+t", mod_control | mod_shift | mod_norepeat, ord("T")),
+        (3, "ctrl+alt+j", mod_control | mod_alt | mod_norepeat, ord("J")),
+    ]
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    registered: dict[int, tuple[str, bool, int]] = {}
+    for hotkey_id, name, mods, vk in candidates:
+        ok = bool(ctypes.windll.user32.RegisterHotKey(None, hotkey_id, mods, vk))
+        err = 0 if ok else ctypes.windll.kernel32.GetLastError()
+        registered[hotkey_id] = (name, ok, err)
+
+    class _Filter(QAbstractNativeEventFilter):
+        def nativeEventFilter(self, event_type, message):
+            if event_type == b"windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == wm_hotkey:
+                    name = registered.get(msg.wParam, ("?", False, 0))[0]
+                    print(f"  >>> FIRED: {name}", flush=True)
+            return False, 0
+
+    filt = _Filter()
+    app.installNativeEventFilter(filt)
+
+    print("hotkey-test: registration results")
+    for name, ok, err in registered.values():
+        status = "registered" if ok else f"FAILED (error {err}; 1409 = already in use)"
+        print(f"  {name:14} {status}")
+    print("\nNow press each combo (try left Ctrl + left Alt). 'FIRED: <combo>' = it works.")
+    print("Auto-exits in 30 seconds (or press Ctrl+C here).")
+    sys.stdout.flush()
+
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    QTimer.singleShot(30000, app.quit)
+    result = app.exec()
+    for hotkey_id in registered:
+        ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+    return result
+
+
 def _make_app():
     from PySide6.QtWidgets import QApplication
 
@@ -194,7 +251,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Initialize everything and exit without the event loop (for verification).",
     )
+    parser.add_argument(
+        "--hotkey-test",
+        action="store_true",
+        help="Register several candidate hotkeys and print which ones fire (for diagnosis).",
+    )
     args = parser.parse_args(argv)
+
+    if args.hotkey_test:
+        return _run_hotkey_test()
 
     from apptutorial.capture.window import ensure_dpi_awareness
 
