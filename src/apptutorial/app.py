@@ -82,7 +82,7 @@ class AppController(QObject):
         self.tray.capture_requested.connect(self.trigger_capture)
         self.tray.pause_toggled.connect(self.set_paused)
         self.tray.quit_requested.connect(app.quit)
-        self.hotkey.triggered.connect(self.trigger_capture)
+        self.hotkey.triggered.connect(self._on_hotkey)
         app.aboutToQuit.connect(self.hotkey.stop)  # unregister the global hotkey on exit
 
     def start(self) -> bool:
@@ -101,6 +101,10 @@ class AppController(QObject):
                 "Use 'Capture in 3s' in this menu, or change APPTUTORIAL_HOTKEY in .env.",
             )
         return registered
+
+    def _on_hotkey(self) -> None:
+        print(f"[hotkey] {self.config.hotkey} pressed -> capturing", flush=True)
+        self.trigger_capture()
 
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
