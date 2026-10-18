@@ -10,7 +10,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 if TYPE_CHECKING:
     from apptutorial.ai.schemas import TutorialStep
@@ -30,6 +37,10 @@ class StepPanel(QWidget):
 
         self._progress = QLabel()
         self._progress.setObjectName("progress")
+        self._bar = QProgressBar()
+        self._bar.setObjectName("progressBar")
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(6)
         self._instruction = QLabel()
         self._instruction.setObjectName("instruction")
         self._instruction.setWordWrap(True)
@@ -49,6 +60,7 @@ class StepPanel(QWidget):
 
         for widget in (
             self._progress,
+            self._bar,
             self._instruction,
             self._done,
             self._why,
@@ -92,6 +104,9 @@ class StepPanel(QWidget):
 
     def show_step(self, step: TutorialStep, index: int, total: int) -> None:
         self._progress.setText(f"Step {index + 1} of {total}")
+        self._bar.setRange(0, total)
+        self._bar.setValue(index + 1)
+        self._bar.show()
         self._instruction.setText(step.instruction)
         self._done.setText(f"{_CHECK} Done when: {step.done_when}")
         self._why.setText(step.rationale)
@@ -124,6 +139,7 @@ class StepPanel(QWidget):
 
     def show_complete(self) -> None:
         self._progress.clear()
+        self._bar.hide()
         self._instruction.setText(f"{_CHECK} Tutorial complete!")
         self._done.clear()
         self._why.hide()

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
@@ -39,6 +40,39 @@ _DEBUG = bool(os.environ.get("APPTUTORIAL_DEBUG"))
 def _log(message: str) -> None:
     if _DEBUG:
         print(message, flush=True)
+
+
+# A1-style cell or range reference, e.g. "B5" or "A1:C10" (optional $ anchors).
+_CELL_REF_RE = re.compile(r"^\$?[A-Za-z]{1,3}\$?[0-9]{1,7}(?::\$?[A-Za-z]{1,3}\$?[0-9]{1,7})?$")
+
+
+def _looks_like_cell(value) -> bool:
+    return bool(value) and bool(_CELL_REF_RE.match(value.strip()))
+
+
+def _cell_ref_of_step(step) -> str | None:
+    """Best-effort cell/range reference a step targets, regardless of how the planner tagged it.
+
+    Checks the structured `check` fields, then a cell-like accessibility hint, then a "cell X"
+    mention in the instruction. Returns None for non-cell steps (they use UIA element bounds).
+    """
+    check = getattr(step, "check", None)
+    if check is not None:
+        if check.kind == "cell_value" and _looks_like_cell(check.target):
+            return check.target.strip()
+        for value in (check.target, check.expected):
+            if _looks_like_cell(value):
+                return value.strip()
+    target = getattr(step, "target", None)
+    hint = getattr(target, "uia_name_hint", None) if target else None
+    if _looks_like_cell(hint):
+        return hint.strip()
+    instruction = getattr(step, "instruction", "") or ""
+    if "cell" in instruction.lower():
+        for token in re.findall(r"\$?[A-Za-z]{1,3}\$?[0-9]{1,7}", instruction):
+            if _looks_like_cell(token):
+                return token.replace("$", "")
+    return None
 
 
 class _AnalyzeSignals(QObject):
@@ -216,16 +250,11 @@ class _ResolveTask(QRunnable):
     def run(self) -> None:
         rect = None
         try:
-            check = getattr(self._step, "check", None)
-            is_cell = (
-                check is not None
-                and check.kind in ("cell_selected", "cell_value")
-                and bool(check.target)
-            )
-            if is_cell:
+            ref = _cell_ref_of_step(self._step)
+            if ref:
                 from apptutorial.accessibility.excel_com import cell_rect
 
-                rect = cell_rect(check.target)  # cell steps: COM only, never a stray element
+                rect = cell_rect(ref)  # cell steps: COM only, never a stray element
             else:
                 target = self._step.target
                 hint = target.uia_name_hint if target else None
@@ -570,21 +599,20 @@ class AppController(QObject):
             self.overlay.show_box(self._target_rect)
 
     def _is_cell_step(self) -> bool:
-        check = getattr(self._steps[self._step_index], "check", None) if self._steps else None
-        return bool(check and check.kind in ("cell_selected", "cell_value") and check.target)
+        return bool(self._steps and _cell_ref_of_step(self._steps[self._step_index]))
 
     def _refresh_overlay(self) -> None:
         """Re-read the current cell's screen box so the highlight tracks scrolling."""
+        ref = _cell_ref_of_step(self._steps[self._step_index]) if self._steps else None
         if (
             not self._guiding
             or self.paused
             or self._awaiting_next
             or self._overlay_in_flight
             or self._window_info is None
-            or not self._is_cell_step()
+            or not ref
         ):
             return
-        ref = self._steps[self._step_index].check.target
         self._overlay_in_flight = True
         task = _CellRectTask(self._step_index, ref)
         task.signals.resolved.connect(self._on_overlay_rect)

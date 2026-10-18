@@ -32,31 +32,39 @@ if TYPE_CHECKING:
     from apptutorial.capture.backend import Screenshot, WindowInfo
 
 _STYLE = """
-QFrame#card { background: #ffffff; border-radius: 14px; }
+QFrame#card { background: #ffffff; border-radius: 16px; }
+QFrame#card, QFrame#card * { font-family: "Segoe UI", "Segoe UI Variable Text", sans-serif; }
 QLabel { color: #1f2328; font-size: 13px; }
-QLabel#title { color: #2e7d32; font-weight: 600; font-size: 14px; }
-QLabel#status { color: #6a737d; }
-QLabel#progress { color: #8a929b; font-size: 12px; }
-QLabel#instruction { color: #1f2328; font-size: 15px; font-weight: 600; }
-QLabel#doneWhen { color: #2e7d32; }
-QLabel#why { color: #57606a; font-style: italic; }
-QLabel#hint { color: #8a6d00; background: #fff6d6; border: 1px solid #f0e2a8;
-              border-radius: 8px; padding: 6px 8px; }
-QLabel#stepStatus { color: #8a929b; font-size: 12px; }
-QLabel#stepStatus[ok="true"] { color: #2e7d32; font-weight: 600; }
-QPushButton { background: #f3f4f6; border: 1px solid #e2e4e8; border-radius: 8px;
-              padding: 7px 10px; color: #1f2328; }
-QPushButton:hover { background: #e9ebef; }
-QPushButton:disabled { color: #b0b6bd; }
-QPushButton:checked { background: #e4ecff; border-color: #c2d4ff; }
-QPushButton#nextBtn[done="true"] { background: #2e7d32; color: #ffffff; border-color: #2e7d32;
-                                   font-weight: 600; }
-QPushButton#nextBtn[done="true"]:hover { background: #2a6e2e; }
-QPushButton#tutorialBtn { text-align: left; }
-QPushButton#close { background: transparent; border: none; color: #6a737d; font-size: 15px; }
-QPushButton#close:hover { background: #eceef1; border-radius: 13px; color: #1f2328; }
-QLineEdit { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
-            border-radius: 8px; padding: 6px 8px; }
+QLabel#title { color: #4c6fff; font-weight: 700; font-size: 14px; letter-spacing: 0.2px; }
+QLabel#status { color: #6b7280; }
+QLabel#progress { color: #9aa1ac; font-size: 11px; font-weight: 600; letter-spacing: 0.4px; }
+QLabel#instruction { color: #15181d; font-size: 16px; font-weight: 600; }
+QLabel#doneWhen { color: #1a8a3a; font-size: 12px; }
+QLabel#why { color: #5b6470; font-style: italic; }
+QLabel#hint { color: #8a6d00; background: #fff7d6; border: 1px solid #f0e2a8;
+              border-radius: 10px; padding: 8px 10px; }
+QLabel#stepStatus { color: #9aa1ac; font-size: 12px; }
+QLabel#stepStatus[ok="true"] { color: #1a8a3a; font-weight: 600; }
+QProgressBar#progressBar { background: #eef0f4; border: none; border-radius: 3px; }
+QProgressBar#progressBar::chunk { background: #4c6fff; border-radius: 3px; }
+QPushButton { background: #f1f3f6; border: 1px solid #e4e7ec; border-radius: 9px;
+              padding: 8px 14px; color: #39414a; font-weight: 500; }
+QPushButton:hover { background: #e8ebf0; }
+QPushButton:disabled { background: #f4f5f7; color: #c0c5cd; border-color: #eceef1; }
+QPushButton:checked { background: #eaefff; border-color: #cdd8ff; }
+QPushButton#nextBtn { background: #4c6fff; border: none; color: #ffffff; font-weight: 600; }
+QPushButton#nextBtn:hover { background: #3f5fe6; }
+QPushButton#nextBtn:disabled { background: #c7d0e8; color: #eef1f8; }
+QPushButton#nextBtn[done="true"] { background: #1a8a3a; color: #ffffff; }
+QPushButton#nextBtn[done="true"]:hover { background: #167132; }
+QPushButton#tutorialBtn { background: #f7f8fa; text-align: left; padding: 10px 12px;
+                          color: #1f2328; }
+QPushButton#tutorialBtn:hover { background: #eef1ff; border-color: #cdd8ff; }
+QPushButton#close { background: transparent; border: none; color: #9aa1ac; font-size: 15px; }
+QPushButton#close:hover { background: #eef0f4; border-radius: 13px; color: #1f2328; }
+QLineEdit { background: #ffffff; color: #1f2328; border: 1px solid #d7dce3;
+            border-radius: 9px; padding: 8px 10px; }
+QLineEdit:focus { border: 1px solid #4c6fff; }
 """
 
 
