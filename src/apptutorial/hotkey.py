@@ -96,6 +96,7 @@ class HotkeyManager(QObject, QAbstractNativeEventFilter):
         except ValueError:
             self._modifiers, self._vk, self._valid = 0, 0, False
         self._registered = False
+        self._last_error = 0
         self._app = None
 
     @property
@@ -105,6 +106,11 @@ class HotkeyManager(QObject, QAbstractNativeEventFilter):
     @property
     def registered(self) -> bool:
         return self._registered
+
+    @property
+    def last_error(self) -> int:
+        """Win32 error code from the last failed RegisterHotKey (1409 = already in use)."""
+        return self._last_error
 
     def start(self) -> bool:
         """Register the hotkey. Returns False if invalid or already taken by another app."""
@@ -123,6 +129,7 @@ class HotkeyManager(QObject, QAbstractNativeEventFilter):
                     None, self._HOTKEY_ID, self._modifiers, self._vk
                 )
             )
+            self._last_error = 0 if ok else ctypes.windll.kernel32.GetLastError()
         except (AttributeError, OSError):
             ok = False
         self._registered = ok

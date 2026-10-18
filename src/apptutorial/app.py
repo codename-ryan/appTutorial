@@ -72,14 +72,22 @@ class AppController(QObject):
         self.hotkey.triggered.connect(self.trigger_capture)
         app.aboutToQuit.connect(self.hotkey.stop)  # unregister the global hotkey on exit
 
-    def start(self) -> None:
+    def start(self) -> bool:
+        """Show the tray and register the hotkey. Returns whether the hotkey registered."""
         self.tray.show()
-        if not self.hotkey.start():
+        registered = self.hotkey.start()
+        if registered:
             self.tray.notify(
                 "appTutorial",
-                f"Could not register hotkey {self.config.hotkey}. "
-                "Use the tray menu to capture.",
+                f"Running. Press {self.config.hotkey} over any window, or use this menu.",
             )
+        else:
+            self.tray.notify(
+                "appTutorial",
+                f"Running, but hotkey {self.config.hotkey} is unavailable. "
+                "Use 'Capture in 3s' in this menu, or change APPTUTORIAL_HOTKEY in .env.",
+            )
+        return registered
 
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
@@ -169,7 +177,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  telemetry       : {config.telemetry_path}")
         return 0
 
-    controller.start()
+    import signal
+
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    # Let Ctrl+C in the launching terminal stop the app (Qt's loop otherwise swallows it).
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    registered = controller.start()
+    print(f"apptutorial {__version__} is running.")
+    print("  Look for the GREEN SQUARE icon in the system tray (near the clock; it may be")
+    print("  hidden under the ^ 'show hidden icons' arrow). Right-click it for the menu.")
+    if registered:
+        print(f"  Hotkey: {config.hotkey}  - press it over any window to capture.")
+    else:
+        print(f"  Hotkey: {config.hotkey} could NOT be registered "
+              f"(error {controller.hotkey.last_error}; 1409 = another app already uses it).")
+        print("    -> Use the tray menu's 'Capture in 3s (for testing)', or pick a free")
+        print("       hotkey in .env, e.g.  APPTUTORIAL_HOTKEY=ctrl+alt+j")
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("  WARNING: no system tray detected - the menu/indicator may not appear.")
+    if not controller.ai.available:
+        print("  Note: no API key loaded - add ANTHROPIC_API_KEY to .env for identification.")
+    print("  Quit: tray menu -> Quit, or press Ctrl+C in this terminal.")
+    sys.stdout.flush()
     return app.exec()
 
 
