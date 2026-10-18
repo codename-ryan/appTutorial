@@ -50,10 +50,10 @@ class TutorialStep(BaseModel):
     index: int = Field(description="0-based step number.")
     instruction: str = Field(
         description=(
-            "A single imperative command telling the user exactly what to do, starting with "
-            "an action verb (Click, Type, Select, Press, Open, Choose, Drag). Exactly one "
-            "action; name the precise element. "
-            "GOOD: 'Click the Developer tab.' BAD: 'You can find macros under Developer.'"
+            "A single imperative command - a physical action (Click, Type, Select, Press, "
+            "Open, Choose, Drag, Scroll, Right-click). Exactly one action; name the precise "
+            "element. Never an observation: do not begin with Look, Notice, Find, Locate, "
+            "See, or Check. GOOD: 'Click the Developer tab.' BAD: 'Look at the ribbon.'"
         )
     )
     rationale: str = Field(

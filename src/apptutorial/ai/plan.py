@@ -21,11 +21,14 @@ screenshot and the UI element list. Never invent menus, tabs, or buttons, and ne
 different version's UI. Prefer the exact element labels from the list.
 
 Write every step as a DIRECT COMMAND to the user - never a description or explanation:
-- instruction: ONE imperative sentence starting with an action verb (Click, Type, Select, \
-Press, Open, Choose, Drag). Exactly one action; name the precise element.
+- instruction: ONE imperative sentence that is a PHYSICAL ACTION the user performs - click, \
+type, select, press, drag, open, choose, scroll, or right-click. Exactly one action; name the \
+precise element. NEVER an observation or orientation: do not begin with Look, Notice, Find, \
+Locate, Observe, See, Check, Identify, or "Go to". If the user must navigate somewhere first, \
+write the click that gets there.
     GOOD: "Click the Developer tab."   "Type =SUM(A1:A10) in cell A11 and press Enter."
-    BAD:  "You'll find macros under Developer."   "Locate the Developer tab."   "The Developer \
-tab contains macro tools."
+    BAD:  "Look at the ribbon."   "Locate the Developer tab."   "Find the Bold button."   \
+"The Developer tab contains macro tools."
 - done_when: the OBSERVABLE change on screen after the action succeeds - something a bystander \
 could confirm by looking at the screen. Describe the app's state, NEVER the user's action, \
 perception, or understanding.

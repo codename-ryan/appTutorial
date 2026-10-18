@@ -41,8 +41,10 @@ QPushButton:hover { background: #e9ebef; }
 QPushButton#tutorialBtn { text-align: left; }
 QPushButton#close { background: transparent; border: none; color: #6a737d; font-size: 15px; }
 QPushButton#close:hover { background: #eceef1; border-radius: 13px; color: #1f2328; }
-QLineEdit { background: #ffffff; border: 1px solid #d0d7de; border-radius: 8px; padding: 6px 8px; }
+QLineEdit { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de;
+            border-radius: 8px; padding: 6px 8px; }
 QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget { background: transparent; }
 """
 
 
@@ -62,6 +64,7 @@ class SessionWindow(QWidget):
         self.resize(360, 540)
         self._placed = False
         self._drag_offset = None
+        self._app_name = ""
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 14, 14, 14)  # room for the drop shadow
@@ -168,6 +171,7 @@ class SessionWindow(QWidget):
         self._raise()
 
     def show_menu(self, ident: AppIdentification, element_count: int) -> None:
+        self._app_name = ident.app_name
         version = f" · v{ident.detected_version_hint}" if ident.detected_version_hint else ""
         self._appline.setText(
             f"<span style='font-size:15px;font-weight:600'>{ident.app_name}</span><br>"
@@ -179,16 +183,24 @@ class SessionWindow(QWidget):
         self._menu.show()
         self._raise()
 
+    def _set_tutorial_header(self, goal: str) -> None:
+        self._appline.setText(
+            f"<span style='font-size:15px;font-weight:600'>{self._app_name}</span><br>"
+            f"<span style='color:#57606a'>Tutorial: {goal}</span>"
+        )
+
     def show_planning(self, goal: str) -> None:
-        self._status.setText(f"Planning: {goal} …")
+        self._set_tutorial_header(goal)
+        self._status.setText("Planning your steps…")
         self._menu.hide()
         self._plan_scroll.hide()
 
     def show_plan(self, plan: TutorialPlan) -> None:
+        if not self._app_name:
+            self._app_name = plan.app_name
+        self._set_tutorial_header(plan.goal)
         self._status.setText("")
-        parts = [
-            f"<div style='font-size:15px;font-weight:600;margin-bottom:4px'>{plan.goal}</div>"
-        ]
+        parts: list[str] = []
         for step in plan.steps:
             parts.append(
                 f"<div style='margin:10px 0 2px'><b>{step.index + 1}. {step.instruction}</b></div>"
