@@ -192,8 +192,14 @@ class SessionWindow(QWidget):
         for step in plan.steps:
             parts.append(
                 f"<div style='margin:10px 0 2px'><b>{step.index + 1}. {step.instruction}</b></div>"
-                f"<div style='margin-left:12px;color:#57606a'>target: {step.target.description}</div>"
-                f"<div style='margin-left:12px;color:#2e7d32'>done when: {step.done_when}</div>"
+            )
+            parts.append(
+                f"<div style='margin-left:12px;color:#57606a'>"
+                f"target: {step.target.description}</div>"
+            )
+            parts.append(
+                f"<div style='margin-left:12px;color:#2e7d32'>"
+                f"done when: {step.done_when}</div>"
             )
         if not plan.steps:
             parts.append("<div>(no steps returned)</div>")
