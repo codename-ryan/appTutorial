@@ -1,9 +1,9 @@
 """appTutorial entry point and session orchestrator.
 
-M2: hotkey -> capture the active window -> identify the app with Claude Sonnet 5 (in a
-background thread) -> show the result + suggested tutorials. Includes the sensitive-app
-denylist, tray capture indicator + pause, and local per-call telemetry. Later milestones add
-the tutorial menu and the guided step panel.
+M3: hotkey -> capture the active window -> read its UI Automation elements and identify the
+app with Claude Sonnet 5 (both off the UI thread) -> show the elements + result. Includes the
+sensitive-app denylist, tray capture indicator + pause, and local per-call telemetry. Later
+milestones add the tutorial menu and the guided step panel.
 """
 
 from __future__ import annotations
@@ -25,39 +25,52 @@ from apptutorial.ui.preview import CapturePreview
 from apptutorial.ui.tray import TrayIcon
 
 
-class _IdentifySignals(QObject):
-    done = Signal(object)  # AppIdentification
+class _AnalyzeSignals(QObject):
+    elements = Signal(object)  # list[UIElement]
+    identified = Signal(object)  # AppIdentification
     failed = Signal(str)
 
 
-class _IdentifyTask(QRunnable):
-    """Runs the (blocking, network) identification off the UI thread."""
+class _AnalyzeTask(QRunnable):
+    """Reads the window's accessibility elements, then identifies the app - off the UI thread."""
 
-    def __init__(self, client: AIClient, png_bytes: bytes, process_name: str) -> None:
+    def __init__(self, ai: AIClient, window, screenshot) -> None:
         super().__init__()
-        self._client = client
-        self._png = png_bytes
-        self._process = process_name
-        self.signals = _IdentifySignals()
+        self._ai = ai
+        self._window = window
+        self._screenshot = screenshot
+        self.signals = _AnalyzeSignals()
 
     def run(self) -> None:
+        from apptutorial.accessibility.uia import format_elements, summarize_active_window
+
+        elements = summarize_active_window(self._window.hwnd)
+        self.signals.elements.emit(elements)
+
+        if not self._ai.available:
+            return
         try:
-            result = identify_app(self._client, self._png, self._process)
+            ident = identify_app(
+                self._ai,
+                self._screenshot.png_bytes,
+                self._window.process_name,
+                format_elements(elements) if elements else None,
+            )
         except Exception as exc:  # delivered to the UI thread as a failure message
             self.signals.failed.emit(str(exc))
         else:
-            self.signals.done.emit(result)
+            self.signals.identified.emit(ident)
 
 
 class AppController(QObject):
-    """Owns session state and wires tray, hotkey, capture, identification, and preview."""
+    """Owns session state and wires tray, hotkey, capture, analysis, and preview."""
 
     def __init__(self, config: Config, app, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.app = app
         self.paused = False
-        self._identify_task: _IdentifyTask | None = None
+        self._task: _AnalyzeTask | None = None
 
         self.telemetry = TelemetryLogger(config.telemetry_path)
         self.ai = AIClient(config.anthropic_api_key, self.telemetry)
@@ -114,26 +127,30 @@ class AppController(QObject):
             return
 
         self.preview.show_capture(window, screenshot)
-
-        if not self.ai.available:
-            self.preview.set_status(
-                "No API key - add ANTHROPIC_API_KEY to .env to enable app identification."
-            )
-            return
-
-        self.preview.set_status("Identifying the app with Claude Sonnet 5...")
-        task = _IdentifyTask(self.ai, screenshot.png_bytes, window.process_name)
-        task.signals.done.connect(self._on_identified)
+        self.preview.set_status("Reading the screen...")
+        task = _AnalyzeTask(self.ai, window, screenshot)
+        task.signals.elements.connect(self._on_elements)
+        task.signals.identified.connect(self._on_identified)
         task.signals.failed.connect(self._on_identify_failed)
-        self._identify_task = task  # keep a reference while it runs
+        self._task = task  # keep a reference while it runs
         QThreadPool.globalInstance().start(task)
 
+    def _on_elements(self, elements) -> None:
+        self.preview.show_elements(elements)
+        if self.ai.available:
+            self.preview.set_status("Identifying the app with Claude Sonnet 5...")
+        else:
+            self._task = None
+            self.preview.set_status(
+                "No API key - add ANTHROPIC_API_KEY to .env to enable identification."
+            )
+
     def _on_identified(self, ident) -> None:
-        self._identify_task = None
+        self._task = None
         self.preview.show_identification(ident)
 
     def _on_identify_failed(self, message: str) -> None:
-        self._identify_task = None
+        self._task = None
         self.preview.set_status(f"Identification failed: {message}")
 
 
@@ -168,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     controller = AppController(config, app)
 
     if args.check:
-        print(f"apptutorial {__version__} - M2 OK: capture + identification wired.")
+        print(f"apptutorial {__version__} - M3 OK: capture + accessibility + identification wired.")
         print(f"  api key present : {config.has_api_key}")
         print(f"  ai available    : {controller.ai.available}")
         print(f"  identify model  : {config.identify_model}")
@@ -191,8 +208,10 @@ def main(argv: list[str] | None = None) -> int:
     if registered:
         print(f"  Hotkey: {config.hotkey}  - press it over any window to capture.")
     else:
-        print(f"  Hotkey: {config.hotkey} could NOT be registered "
-              f"(error {controller.hotkey.last_error}; 1409 = another app already uses it).")
+        print(
+            f"  Hotkey: {config.hotkey} could NOT be registered "
+            f"(error {controller.hotkey.last_error}; 1409 = another app already uses it)."
+        )
         print("    -> Use the tray menu's 'Capture in 3s (for testing)', or pick a free")
         print("       hotkey in .env, e.g.  APPTUTORIAL_HOTKEY=ctrl+alt+j")
     if not QSystemTrayIcon.isSystemTrayAvailable():

@@ -1,7 +1,8 @@
 """App identification (Claude Sonnet 5 -> AppIdentification).
 
-Takes the active-window screenshot + process name and returns the app, category, on-screen
-context, and suggested tutorials. UIA grounding is added in M3. See SPEC.md §8.
+Takes the active-window screenshot + process name + (optionally) a UI Automation element
+summary, and returns the app, category, on-screen context, and suggested tutorials.
+See SPEC.md §8.
 """
 
 from __future__ import annotations
@@ -13,11 +14,13 @@ from apptutorial.ai.schemas import AppIdentification
 from apptutorial.config import IDENTIFY_MODEL
 
 _SYSTEM = """You are appTutorial's app identifier. You are shown a screenshot of the user's \
-active window and its OS process name.
+active window, its OS process name, and (when available) a list of real UI elements read from \
+the window via Windows accessibility.
 
 Identify the application and what the user appears to be doing RIGHT NOW, grounded ONLY in \
-what is visible in the screenshot. Never assume menus, buttons, or features from other \
-versions of the app - describe only what you can actually see.
+what is visible in the screenshot and the accessibility elements. Never assume menus, buttons, \
+or features from other versions of the app - describe only what you can actually see. When the \
+accessibility element list is provided, treat those names as authoritative labels.
 
 Then propose 2-5 tutorials tailored to this app and what's on screen. Each tutorial needs a \
 kebab-case id, a short title, and a kind:
@@ -35,9 +38,18 @@ _USER_TEXT = (
 
 
 def identify_app(
-    client: AIClient, png_bytes: bytes, process_name: str
+    client: AIClient,
+    png_bytes: bytes,
+    process_name: str,
+    elements_text: str | None = None,
 ) -> AppIdentification:
     image_b64 = base64.standard_b64encode(png_bytes).decode("ascii")
+    text = _USER_TEXT.format(process=process_name or "(unknown)")
+    if elements_text:
+        text += (
+            "\n\nUI elements detected via accessibility (authoritative labels - "
+            "prefer these exact names):\n" + elements_text
+        )
     messages = [
         {
             "role": "user",
@@ -50,10 +62,7 @@ def identify_app(
                         "data": image_b64,
                     },
                 },
-                {
-                    "type": "text",
-                    "text": _USER_TEXT.format(process=process_name or "(unknown)"),
-                },
+                {"type": "text", "text": text},
             ],
         }
     ]

@@ -1,8 +1,9 @@
-"""Transient capture + identification window (M1/M2 verification aid).
+"""Transient capture + identification window (M1-M3 verification aid).
 
-Shows what the capture layer grabbed (window metadata + screenshot) and, once identified,
-the app Claude recognized plus its suggested tutorials. Later milestones replace this with
-the real tutorial menu and step panel. The screenshot is shown from memory, never saved.
+Shows what the capture layer grabbed (window metadata + screenshot), the UI Automation
+elements read from the window, and, once identified, the app Claude recognized plus its
+suggested tutorials. Later milestones replace this with the real tutorial menu and step
+panel. The screenshot is shown from memory, never saved.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from apptutorial.capture.backend import Screenshot, WindowInfo
 
 if TYPE_CHECKING:
+    from apptutorial.accessibility.uia import UIElement
     from apptutorial.ai.schemas import AppIdentification
 
 _MAX_PREVIEW_WIDTH = 900
@@ -25,13 +27,16 @@ class CapturePreview(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("appTutorial - capture preview")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
 
         self._info = QLabel()
         self._info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._status = QLabel()
         self._status.setStyleSheet("color: gray;")
+        self._elements = QLabel()
+        self._elements.setWordWrap(True)
+        self._elements.setStyleSheet("color: #555;")
         self._ident = QLabel()
         self._ident.setWordWrap(True)
         self._ident.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -40,11 +45,13 @@ class CapturePreview(QWidget):
 
         layout.addWidget(self._info)
         layout.addWidget(self._status)
+        layout.addWidget(self._elements)
         layout.addWidget(self._ident)
         layout.addWidget(self._image, 1)
 
     def show_capture(self, window: WindowInfo, screenshot: Screenshot) -> None:
         self._status.setText("")
+        self._elements.setText("")
         self._ident.setText("")
         self._info.setText(
             f"<b>title:</b> {window.title or '(none)'}<br>"
@@ -63,13 +70,26 @@ class CapturePreview(QWidget):
                 _MAX_PREVIEW_WIDTH, Qt.TransformationMode.SmoothTransformation
             )
         self._image.setPixmap(pix)
-        self.resize(min(pix.width() + 40, 960), min(pix.height() + 240, 900))
+        self.resize(min(pix.width() + 40, 980), min(pix.height() + 300, 900))
         self.show()
         self.raise_()
         self.activateWindow()
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
+
+    def show_elements(self, elements: list[UIElement]) -> None:
+        if not elements:
+            self._elements.setText(
+                "<b>UI Automation:</b> no elements read "
+                "(this app may not expose an accessibility tree)."
+            )
+            return
+        names = ", ".join(e.name for e in elements[:30])
+        more = f" (+{len(elements) - 30} more)" if len(elements) > 30 else ""
+        self._elements.setText(
+            f"<b>UI Automation</b> read {len(elements)} elements: {names}{more}"
+        )
 
     def show_identification(self, ident: AppIdentification) -> None:
         self._status.setText("")
