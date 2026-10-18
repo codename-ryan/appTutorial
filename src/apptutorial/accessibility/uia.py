@@ -11,6 +11,7 @@ content into the summary. Coverage varies by app; any failure degrades to an emp
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 # Interactive / chrome control types worth surfacing to the model. Deliberately excludes
@@ -58,6 +59,12 @@ def summarize_active_window(
         import uiautomation as auto
     except Exception:
         return []
+
+    # Stop the library from dropping an @AutomationLog.txt file in the working directory.
+    try:
+        auto.Logger.SetLogFile(os.devnull)
+    except Exception:
+        pass
 
     elements: list[UIElement] = []
     try:

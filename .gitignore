@@ -16,3 +16,6 @@ venv/
 telemetry*.jsonl
 # Never commit anything that looks like an API key / token
 sk-ant-*
+
+# uiautomation library debug log
+@AutomationLog.txt
