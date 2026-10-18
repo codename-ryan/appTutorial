@@ -104,14 +104,15 @@ class _WatchTask(QRunnable):
     screenshot never leaves this worker.
     """
 
-    def __init__(self, hwnd: int) -> None:
+    def __init__(self, hwnd: int, rect: tuple[int, int, int, int] | None = None) -> None:
         super().__init__()
         self._hwnd = hwnd
+        self._rect = rect  # focus the fingerprint on this target box, if known
         self.signals = _WatchSignals()
 
     def run(self) -> None:
         from apptutorial.capture.change_detector import fingerprint
-        from apptutorial.capture.screenshot import capture_window
+        from apptutorial.capture.screenshot import capture_window, crop_png, image_box_from_rect
         from apptutorial.capture.window import window_info_for_hwnd
 
         try:
@@ -120,7 +121,11 @@ class _WatchTask(QRunnable):
                 self.signals.result.emit(None)
                 return
             shot = capture_window(window)
-            self.signals.result.emit(fingerprint(shot.png_bytes))
+            png = shot.png_bytes
+            if self._rect is not None:
+                box = image_box_from_rect(window, shot.width, shot.height, self._rect)
+                png = crop_png(shot.png_bytes, box) or shot.png_bytes
+            self.signals.result.emit(fingerprint(png))
         except Exception:  # a transient capture hiccup shouldn't kill the watch loop
             self.signals.result.emit(None)
 
@@ -133,18 +138,21 @@ class _VerifySignals(QObject):
 class _VerifyTask(QRunnable):
     """Captures a fresh screenshot of the target window and asks Haiku if the step is done."""
 
-    def __init__(self, ai: AIClient, hwnd: int, step, app_name: str) -> None:
+    def __init__(
+        self, ai: AIClient, hwnd: int, step, app_name: str, rect: tuple | None = None
+    ) -> None:
         super().__init__()
         self._ai = ai
         self._hwnd = hwnd
         self._step = step
         self._app_name = app_name
+        self._rect = rect  # target box, for a focused close-up image
         self.signals = _VerifySignals()
 
     def run(self) -> None:
         from apptutorial.accessibility.uia import format_elements, summarize_active_window
         from apptutorial.ai.verify import verify_step
-        from apptutorial.capture.screenshot import capture_window
+        from apptutorial.capture.screenshot import capture_window, crop_png, image_box_from_rect
         from apptutorial.capture.window import window_info_for_hwnd
 
         try:
@@ -153,14 +161,21 @@ class _VerifyTask(QRunnable):
                 self.signals.failed.emit("target window not found")
                 return
             shot = capture_window(window)
+            crop = None
+            if self._rect is not None:
+                box = image_box_from_rect(window, shot.width, shot.height, self._rect)
+                crop = crop_png(shot.png_bytes, box)
             # Ground the check in the live accessibility tree (control states vision can miss).
+            # Lighter limits than identification keeps this check responsive.
             try:
-                elements = summarize_active_window(self._hwnd)
+                elements = summarize_active_window(
+                    self._hwnd, max_elements=60, max_depth=8, max_visit=450
+                )
                 elements_text = format_elements(elements) if elements else None
             except Exception:
                 elements_text = None
             result = verify_step(
-                self._ai, shot.png_bytes, self._step, self._app_name, elements_text
+                self._ai, shot.png_bytes, self._step, self._app_name, elements_text, crop
             )
         except Exception as exc:
             self.signals.failed.emit(str(exc))
@@ -168,12 +183,38 @@ class _VerifyTask(QRunnable):
             self.signals.done.emit(result)
 
 
+class _ResolveSignals(QObject):
+    resolved = Signal(int, object)  # (step_index, rect-or-None)
+
+
+class _ResolveTask(QRunnable):
+    """Resolves a step's target element to a screen box via UIA, so tracking can focus on it."""
+
+    def __init__(self, hwnd: int, step_index: int, name_hint: str, role_hint: str | None) -> None:
+        super().__init__()
+        self._hwnd = hwnd
+        self._step_index = step_index
+        self._name_hint = name_hint
+        self._role_hint = role_hint
+        self.signals = _ResolveSignals()
+
+    def run(self) -> None:
+        from apptutorial.accessibility.uia import find_element_rect
+
+        try:
+            rect = find_element_rect(self._hwnd, self._name_hint, self._role_hint)
+        except Exception:
+            rect = None
+        self.signals.resolved.emit(self._step_index, rect)
+
+
 class AppController(QObject):
     """Owns session state and drives capture -> identify -> menu -> plan -> guided steps."""
 
+    _WATCH_INTERVAL_MS = 800  # how often the local screen fingerprint is taken
     # Verify at least this often (in watch ticks) even if no screen change is detected, so a
     # step still advances when the change is too subtle for the local fingerprint to catch.
-    _PERIODIC_VERIFY_TICKS = 6  # ~7s at the 1200ms tick interval
+    _PERIODIC_VERIFY_TICKS = 6  # ~5s at the watch interval
 
     def __init__(self, config: Config, app, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -198,14 +239,17 @@ class AppController(QObject):
         self._verifying = False
         self._verify_step_index = -1  # which step the in-flight verify is judging
         self._awaiting_next = False  # step detected done; waiting for the user to click Next
+        self._completed = False  # whole tutorial finished; Next now returns to the menu
         self._watch_in_flight = False
         self._ticks_since_verify = 0  # safety net: verify periodically even without a change
         self._baseline_fp = None
         self._prev_fp = None
+        self._target_rect = None  # screen box of the current step's target element (if resolved)
         self._watch_task: _WatchTask | None = None
         self._verify_task: _VerifyTask | None = None
+        self._resolve_task: _ResolveTask | None = None
         self._watch_timer = QTimer(self)
-        self._watch_timer.setInterval(1200)
+        self._watch_timer.setInterval(self._WATCH_INTERVAL_MS)
         self._watch_timer.timeout.connect(self._tick)
 
         self.telemetry = TelemetryLogger(config.telemetry_path)
@@ -263,6 +307,7 @@ class AppController(QObject):
             self.tray.notify("appTutorial", "Capture is paused.")
             return
         self._stop_guiding()  # a fresh capture ends any tutorial in progress
+        self._completed = False
         window = self.backend.active_window()
         if window is None:
             self.tray.notify("appTutorial", "No active window detected.")
@@ -362,6 +407,8 @@ class AppController(QObject):
         self._prev_fp = None
         self._ticks_since_verify = 0
         self._awaiting_next = False
+        self._completed = False
+        self._target_rect = None
         self._guiding = True
         if self._window_info is not None:
             w = self._window_info
@@ -370,8 +417,29 @@ class AppController(QObject):
                 f"({w.process_name or '?'}, hwnd={w.hwnd}): {step.instruction}",
                 flush=True,
             )
+            self._resolve_target(index, step)
         if not self.paused:
             self._watch_timer.start()
+
+    def _resolve_target(self, index: int, step) -> None:
+        """Kick off a best-effort UIA lookup of the step's target box (focuses tracking on it)."""
+        hint = step.target.uia_name_hint if step.target else None
+        if not hint:
+            return
+        task = _ResolveTask(self._window_info.hwnd, index, hint, step.target.uia_role_hint)
+        task.signals.resolved.connect(self._on_target_resolved)
+        self._resolve_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _on_target_resolved(self, index: int, rect) -> None:
+        self._resolve_task = None
+        if not self._guiding or index != self._step_index or rect is None:
+            return
+        self._target_rect = rect
+        print(f"[target] step {index + 1} box = {rect}", flush=True)
+        # Detection now focuses on the box; re-baseline so the switch doesn't false-trigger.
+        self._baseline_fp = None
+        self._prev_fp = None
 
     def _stop_guiding(self) -> None:
         self._guiding = False
@@ -395,7 +463,7 @@ class AppController(QObject):
         if self._watch_in_flight:
             return
         self._watch_in_flight = True
-        task = _WatchTask(self._window_info.hwnd)
+        task = _WatchTask(self._window_info.hwnd, self._target_rect)
         task.signals.result.connect(self._on_watch)
         self._watch_task = task
         QThreadPool.globalInstance().start(task)
@@ -440,7 +508,9 @@ class AppController(QObject):
         self._ticks_since_verify = 0
         self.window.set_step_status("Checking…")
         step = self._steps[self._step_index]
-        task = _VerifyTask(self.ai, self._window_info.hwnd, step, self._current_app_name())
+        task = _VerifyTask(
+            self.ai, self._window_info.hwnd, step, self._current_app_name(), self._target_rect
+        )
         task.signals.done.connect(self._on_verify)
         task.signals.failed.connect(self._on_verify_failed)
         self._verify_task = task
@@ -486,9 +556,23 @@ class AppController(QObject):
 
     def _complete(self) -> None:
         self._stop_guiding()
+        self._completed = True  # Next now returns to the tutorial menu
         self.window.show_complete()
 
+    def _restart_to_menu(self) -> None:
+        """From the completion screen, go back to the tutorial options for the same app."""
+        self._completed = False
+        self._guiding = False
+        self._awaiting_next = False
+        if self._ident is not None:
+            self.window.show_menu(self._ident, len(self._elements) if self._elements else 0)
+        else:
+            self.trigger_capture()  # no cached identification: just re-capture
+
     def _on_next(self) -> None:
+        if self._completed:
+            self._restart_to_menu()
+            return
         if not self._guiding:
             return
         self._advance()

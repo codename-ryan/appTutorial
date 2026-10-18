@@ -112,6 +112,75 @@ def _walk(control, depth, max_depth, max_elements, max_visit, state, out) -> Non
             _walk(child, depth + 1, max_depth, max_elements, max_visit, state, out)
 
 
+def find_element_rect(
+    hwnd: int,
+    name_hint: str,
+    role_hint: str | None = None,
+    *,
+    max_depth: int = 9,
+    max_visit: int = 800,
+) -> tuple[int, int, int, int] | None:
+    """Best-effort screen-pixel box (left, top, width, height) of the element a step targets.
+
+    Matches the first element whose accessibility name matches ``name_hint`` (and role, if
+    given), so change-detection and verification can focus on that specific control. Returns
+    ``None`` on any failure - callers fall back to tracking the whole window.
+    """
+    if not name_hint:
+        return None
+    try:
+        import uiautomation as auto
+    except Exception:
+        return None
+    try:
+        auto.Logger.SetLogFile(os.devnull)
+    except Exception:
+        pass
+
+    target = name_hint.strip().lower()
+    role = (role_hint or "").strip().lower().removesuffix("control")
+    try:
+        with auto.UIAutomationInitializerInThread():
+            root = auto.ControlFromHandle(hwnd)
+            if root is None:
+                return None
+            return _search_rect(root, 0, max_depth, max_visit, {"visited": 0}, target, role)
+    except Exception:
+        return None
+
+
+def _search_rect(control, depth, max_depth, max_visit, state, target, role):
+    if depth > max_depth or state["visited"] >= max_visit:
+        return None
+    try:
+        children = control.GetChildren()
+    except Exception:
+        return None
+    for child in children:
+        if state["visited"] >= max_visit:
+            return None
+        state["visited"] += 1
+        try:
+            name = (child.Name or "").strip().lower()
+            control_type = child.ControlTypeName
+        except Exception:
+            continue
+        ctype = control_type.removesuffix("Control").lower()
+        if name and (name == target or target in name or name in target):
+            if not role or role in ctype or ctype in role:
+                try:
+                    rect = child.BoundingRectangle
+                    if rect.width() > 0 and rect.height() > 0:
+                        return (rect.left, rect.top, rect.width(), rect.height())
+                except Exception:
+                    pass
+        if control_type not in _SKIP_DESCENT:
+            found = _search_rect(child, depth + 1, max_depth, max_visit, state, target, role)
+            if found:
+                return found
+    return None
+
+
 def format_elements(elements: list[UIElement], limit: int = 50) -> str:
     """Compact text for the model prompt, e.g. ``- [TabItem] Home``."""
     if not elements:

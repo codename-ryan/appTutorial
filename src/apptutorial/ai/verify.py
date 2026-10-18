@@ -36,15 +36,31 @@ reasonable equivalents. When not done or off track, give one short, specific hin
 concrete action. Keep observation to one sentence naming the concrete evidence you used."""
 
 
+def _image_block(png_bytes: bytes) -> dict:
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.standard_b64encode(png_bytes).decode("ascii"),
+        },
+    }
+
+
 def verify_step(
     client: AIClient,
     png_bytes: bytes,
     step: TutorialStep,
     app_name: str,
     elements_text: str | None = None,
+    crop_png_bytes: bytes | None = None,
 ) -> StepVerification:
-    image_b64 = base64.standard_b64encode(png_bytes).decode("ascii")
     signals = ", ".join(step.done_signals) or "(none)"
+    content: list[dict] = [_image_block(png_bytes)]
+    if crop_png_bytes:
+        caption = f"Close-up of the target ({step.target.description}):"
+        content.append({"type": "text", "text": caption})
+        content.append(_image_block(crop_png_bytes))
     text = (
         f"App: {app_name}\n"
         f"Step instruction: {step.instruction}\n"
@@ -58,22 +74,8 @@ def verify_step(
             f"{elements_text}\n"
         )
     text += "\nHas this step been completed? Judge from the screenshot and the UI elements."
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": image_b64,
-                    },
-                },
-                {"type": "text", "text": text},
-            ],
-        }
-    ]
+    content.append({"type": "text", "text": text})
+    messages = [{"role": "user", "content": content}]
     return client.parse(
         model=VERIFY_MODEL,
         call_type="verify",
