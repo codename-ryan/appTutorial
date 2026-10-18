@@ -59,6 +59,7 @@ class StepCheck(BaseModel):
         "element_focused",
         "element_present",
         "cell_selected",
+        "cell_value",
         "checkbox_checked",
         "value_equals",
         "visual",
@@ -66,26 +67,29 @@ class StepCheck(BaseModel):
         default="visual",
         description=(
             "How completion can be checked. 'cell_selected': a spreadsheet cell/range is "
-            "selected (put the reference in 'expected', e.g. 'B5'). 'element_selected': a "
-            "tab/item becomes selected (name in 'target'). 'element_present': a dialog/pane/"
-            "window appears (its title in 'target'). 'element_focused': a field gains focus "
-            "(name in 'target'). 'checkbox_checked': a checkbox/toggle turns on (name in "
-            "'target'). 'value_equals': a control shows a value (name in 'target', value in "
-            "'expected'). 'visual': anything else - judged from the screenshot."
+            "selected (its reference in 'target', e.g. 'B5'). 'cell_value': a cell now holds a "
+            "value/formula ('target' = the cell, e.g. 'A11'; 'expected' = the value or formula, "
+            "e.g. '42' or '=SUM(A1:A10)'). 'element_selected': a tab/item becomes selected (name "
+            "in 'target'). 'element_present': a dialog/pane/window appears (its title in "
+            "'target'). 'element_focused': a field gains focus (name in 'target'). "
+            "'checkbox_checked': a checkbox/toggle turns on (name in 'target'). 'value_equals': a "
+            "non-cell control shows a value (name in 'target', value in 'expected'). 'visual': "
+            "anything else - judged from the screenshot."
         ),
     )
     target: str | None = Field(
         default=None,
         description=(
-            "Accessibility name of the element to check (tab/dialog/field/checkbox), usually "
-            "the same as the step's target uia_name_hint. Null for 'cell_selected' and 'visual'."
+            "What to check: a cell/range reference for 'cell_selected'/'cell_value' (e.g. 'B5'), "
+            "or the element's accessibility name for the element/checkbox/value kinds. Null for "
+            "'visual'."
         ),
     )
     expected: str | None = Field(
         default=None,
         description=(
-            "For 'cell_selected': the cell/range reference, e.g. 'B5'. For 'value_equals': the "
-            "expected value. Null otherwise."
+            "The expected value for 'cell_value' (e.g. '42' or '=SUM(A1:A10)') or 'value_equals'. "
+            "Null for the other kinds."
         ),
     )
 

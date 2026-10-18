@@ -43,15 +43,18 @@ uia_role_hint to its control type when they appear in the element list, else nul
 - check: a machine-checkable completion condition so the step can be verified WITHOUT the AI \
 whenever possible. Pick the most specific kind that fits and fill its fields:
     - "cell_selected" when the step selects a spreadsheet cell/range - put the reference (e.g. \
-"B5") in expected, leave target null.
+"B5") in target.
+    - "cell_value" when the step types a value or formula INTO a cell - put the cell in target \
+(e.g. "A11") and the value/formula in expected (e.g. "42" or "=SUM(A1:A10)").
     - "element_selected" when a tab or item becomes selected - put its exact name in target.
     - "element_present" when a dialog, pane, or window appears - put its title in target.
     - "element_focused" when a field/box gains focus - put its name in target.
     - "checkbox_checked" when a checkbox/toggle turns on - put its name in target.
-    - "value_equals" when a control should show a value - target = its name, expected = value.
-    - "visual" ONLY when none of the above fit (needs looking at the screen).
-  Prefer a concrete kind over "visual" when the done state is a selection, a dialog, focus, a \
-toggle, or a cell - those are the common, reliably checkable cases.
+    - "value_equals" when a non-cell control should show a value - target = its name, \
+expected = value.
+    - "visual" ONLY when none of the above fit (e.g. a chart's appearance - needs looking).
+  Prefer a concrete kind over "visual" when the done state is a cell selection, a cell value, \
+a selection, a dialog, focus, or a toggle - those are the common, reliably checkable cases.
 
 Keep steps atomic (one action each) and the plan focused (usually 3-10 steps). Number steps \
 from 0. If the goal isn't reachable from what's visible, give the best next steps toward it."""

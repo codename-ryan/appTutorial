@@ -239,6 +239,9 @@ class AppController(QObject):
     """Owns session state and drives capture -> identify -> menu -> plan -> guided steps."""
 
     _WATCH_INTERVAL_MS = 800  # how often the local screen fingerprint is taken
+    # Local checks can be transiently undetermined (e.g. Excel COM rejects calls while a cell is
+    # being edited). Only fall back to AI after this many undetermined ticks in a row.
+    _LOCAL_NONE_LIMIT = 8  # ~6s at the watch interval
     # Verify at least this often (in watch ticks) even if no screen change is detected, so a
     # step still advances when the change is too subtle for the local fingerprint to catch.
     _PERIODIC_VERIFY_TICKS = 6  # ~5s at the watch interval
@@ -450,7 +453,14 @@ class AppController(QObject):
         if self._window_info is not None:
             w = self._window_info
             check = getattr(step, "check", None)
-            check_desc = f"{check.kind}:{check.expected or check.target}" if check else "visual"
+            if check is None:
+                check_desc = "visual"
+            else:
+                check_desc = check.kind
+                if check.target:
+                    check_desc += f":{check.target}"
+                if check.expected:
+                    check_desc += f"={check.expected}"
             print(
                 f"[step {index + 1}/{len(self._steps)}] watching '{w.title}' "
                 f"({w.process_name or '?'}, hwnd={w.hwnd}) [check={check_desc}]: "
@@ -549,9 +559,9 @@ class AppController(QObject):
             self._mark_step_done()
             return
         if result is None:
-            # Can't determine locally a few times running -> hand this step to the AI.
+            # Undetermined for a sustained stretch -> hand this step to the AI.
             self._local_none_count += 1
-            if self._local_none_count >= 3:
+            if self._local_none_count >= self._LOCAL_NONE_LIMIT:
                 print(
                     f"[local] step {self._step_index + 1}: undetermined -> AI fallback",
                     flush=True,
@@ -561,6 +571,8 @@ class AppController(QObject):
                 self._prev_fp = None
                 self._ticks_since_verify = 0
             return
+        # result is False: the deterministic channel works, just not done yet - reset the counter.
+        self._local_none_count = 0
         self.window.set_step_status("Watching your screen…")
 
     def _on_watch(self, fingerprint) -> None:
