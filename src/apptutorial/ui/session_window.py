@@ -43,11 +43,15 @@ QLabel#why { color: #57606a; font-style: italic; }
 QLabel#hint { color: #8a6d00; background: #fff6d6; border: 1px solid #f0e2a8;
               border-radius: 8px; padding: 6px 8px; }
 QLabel#stepStatus { color: #8a929b; font-size: 12px; }
+QLabel#stepStatus[ok="true"] { color: #2e7d32; font-weight: 600; }
 QPushButton { background: #f3f4f6; border: 1px solid #e2e4e8; border-radius: 8px;
               padding: 7px 10px; color: #1f2328; }
 QPushButton:hover { background: #e9ebef; }
 QPushButton:disabled { color: #b0b6bd; }
 QPushButton:checked { background: #e4ecff; border-color: #c2d4ff; }
+QPushButton#nextBtn[done="true"] { background: #2e7d32; color: #ffffff; border-color: #2e7d32;
+                                   font-weight: 600; }
+QPushButton#nextBtn[done="true"]:hover { background: #2a6e2e; }
 QPushButton#tutorialBtn { text-align: left; }
 QPushButton#close { background: transparent; border: none; color: #6a737d; font-size: 15px; }
 QPushButton#close:hover { background: #eceef1; border-radius: 13px; color: #1f2328; }
@@ -237,6 +241,10 @@ class SessionWindow(QWidget):
 
     def show_hint(self, text: str) -> None:
         self._panel.show_hint(text)
+
+    def show_step_done(self, is_last: bool) -> None:
+        self._panel.show_step_done(is_last)
+        self._raise()
 
     def show_complete(self) -> None:
         self._panel.show_complete()

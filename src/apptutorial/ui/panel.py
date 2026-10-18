@@ -65,6 +65,7 @@ class StepPanel(QWidget):
         self._why_btn.setCheckable(True)
         self._why_btn.toggled.connect(self._toggle_why)
         self._next = QPushButton("Next")
+        self._next.setObjectName("nextBtn")
         self._next.clicked.connect(lambda: self.next_clicked.emit())
         for button in (self._back, self._why_btn, self._next):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -76,6 +77,18 @@ class StepPanel(QWidget):
 
     def _toggle_why(self, checked: bool) -> None:
         self._why.setVisible(checked and bool(self._why.text()))
+
+    @staticmethod
+    def _repolish(widget) -> None:
+        """Re-apply the stylesheet after a dynamic property changes (e.g. the done state)."""
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _set_next_green(self, on: bool) -> None:
+        self._next.setProperty("done", on)
+        self._status.setProperty("ok", on)
+        self._repolish(self._next)
+        self._repolish(self._status)
 
     def show_step(self, step: TutorialStep, index: int, total: int) -> None:
         self._progress.setText(f"Step {index + 1} of {total}")
@@ -90,6 +103,7 @@ class StepPanel(QWidget):
         self._back.setEnabled(index > 0)
         self._next.setEnabled(True)
         self._next.setText("Finish" if index >= total - 1 else "Next")
+        self._set_next_green(False)  # back to the neutral style for a fresh step
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
@@ -97,6 +111,15 @@ class StepPanel(QWidget):
     def show_hint(self, text: str) -> None:
         self._hint.setText(f"Hint: {text}")
         self._hint.setVisible(bool(text))
+
+    def show_step_done(self, is_last: bool) -> None:
+        """Step looks complete: turn the Next button green and wait for the user to confirm."""
+        self._hint.clear()
+        self._hint.hide()
+        self._status.setText(f"{_CHECK} Looks done - click to continue.")
+        self._next.setText(f"{_CHECK} Finish" if is_last else f"{_CHECK} Next step")
+        self._next.setEnabled(True)
+        self._set_next_green(True)
 
     def show_complete(self) -> None:
         self._progress.clear()

@@ -52,6 +52,22 @@ def test_verify_step_sends_screenshot_as_image_block():
     assert content[1]["type"] == "text"
 
 
+def test_verify_step_includes_uia_elements_when_provided():
+    client = _FakeClient(
+        StepVerification(status="done", confidence=0.8, observation="Tab is selected.")
+    )
+    verify_step(
+        client,
+        b"fake-png-bytes",
+        _step(),
+        "Microsoft Excel",
+        elements_text="TabItem: Developer (selected)",
+    )
+    text = client.calls[0]["messages"][0]["content"][1]["text"]
+    assert "Developer (selected)" in text
+    assert "accessibility tree" in text
+
+
 def test_step_verification_hint_defaults_to_none():
     verification = StepVerification(
         status="not_done", confidence=0.4, observation="Nothing changed."

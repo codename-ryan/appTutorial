@@ -142,6 +142,7 @@ class _VerifyTask(QRunnable):
         self.signals = _VerifySignals()
 
     def run(self) -> None:
+        from apptutorial.accessibility.uia import format_elements, summarize_active_window
         from apptutorial.ai.verify import verify_step
         from apptutorial.capture.screenshot import capture_window
         from apptutorial.capture.window import window_info_for_hwnd
@@ -152,7 +153,15 @@ class _VerifyTask(QRunnable):
                 self.signals.failed.emit("target window not found")
                 return
             shot = capture_window(window)
-            result = verify_step(self._ai, shot.png_bytes, self._step, self._app_name)
+            # Ground the check in the live accessibility tree (control states vision can miss).
+            try:
+                elements = summarize_active_window(self._hwnd)
+                elements_text = format_elements(elements) if elements else None
+            except Exception:
+                elements_text = None
+            result = verify_step(
+                self._ai, shot.png_bytes, self._step, self._app_name, elements_text
+            )
         except Exception as exc:
             self.signals.failed.emit(str(exc))
         else:
@@ -188,6 +197,7 @@ class AppController(QObject):
         self._guiding = False
         self._verifying = False
         self._verify_step_index = -1  # which step the in-flight verify is judging
+        self._awaiting_next = False  # step detected done; waiting for the user to click Next
         self._watch_in_flight = False
         self._ticks_since_verify = 0  # safety net: verify periodically even without a change
         self._baseline_fp = None
@@ -241,7 +251,7 @@ class AppController(QObject):
         self.tray.set_paused(paused)
         if paused:
             self._watch_timer.stop()
-        elif self._guiding:
+        elif self._guiding and not self._awaiting_next:
             # Resuming: re-baseline so a change made while paused doesn't false-trigger.
             self._baseline_fp = None
             self._prev_fp = None
@@ -351,6 +361,7 @@ class AppController(QObject):
         self._baseline_fp = None
         self._prev_fp = None
         self._ticks_since_verify = 0
+        self._awaiting_next = False
         self._guiding = True
         if self._window_info is not None:
             w = self._window_info
@@ -364,10 +375,17 @@ class AppController(QObject):
 
     def _stop_guiding(self) -> None:
         self._guiding = False
+        self._awaiting_next = False
         self._watch_timer.stop()
 
     def _tick(self) -> None:
-        if not self._guiding or self.paused or self._verifying or self._window_info is None:
+        if (
+            not self._guiding
+            or self.paused
+            or self._verifying
+            or self._awaiting_next
+            or self._window_info is None
+        ):
             return
         self._ticks_since_verify += 1
         if self._ticks_since_verify >= self._PERIODIC_VERIFY_TICKS:
@@ -385,7 +403,13 @@ class AppController(QObject):
     def _on_watch(self, fingerprint) -> None:
         self._watch_in_flight = False
         self._watch_task = None
-        if not self._guiding or self.paused or self._verifying or fingerprint is None:
+        if (
+            not self._guiding
+            or self.paused
+            or self._verifying
+            or self._awaiting_next
+            or fingerprint is None
+        ):
             return
 
         from apptutorial.capture.change_detector import changed, difference, settled
@@ -431,14 +455,21 @@ class AppController(QObject):
             flush=True,
         )
         # Ignore a result that arrives after the user manually moved to another step.
-        if not self._guiding or self._verify_step_index != self._step_index:
+        if not self._guiding or self._awaiting_next or self._verify_step_index != self._step_index:
             return
         if result.status == "done" and result.confidence >= 0.5:
-            self._advance()
+            self._mark_step_done()
             return
         if result.status in ("not_done", "off_track") and result.hint:
             self.window.show_hint(result.hint)
         self.window.set_step_status("Watching your screen…")
+
+    def _mark_step_done(self) -> None:
+        """Step looks complete: stop watching and let the user confirm with the green button."""
+        self._awaiting_next = True
+        self._watch_timer.stop()
+        is_last = self._step_index + 1 >= len(self._steps)
+        self.window.show_step_done(is_last)
 
     def _on_verify_failed(self, message: str) -> None:
         self._verifying = False
