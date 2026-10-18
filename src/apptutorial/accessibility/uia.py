@@ -31,6 +31,10 @@ _USEFUL_TYPES = frozenset(
     }
 )
 
+# Content containers we never descend into - their subtrees are huge document/cell content
+# (e.g. Excel's cell grid), which would blow the visit budget before reaching real chrome.
+_SKIP_DESCENT = frozenset({"DataGridControl", "TableControl", "DocumentControl"})
+
 
 @dataclass(frozen=True)
 class UIElement:
@@ -48,7 +52,7 @@ def is_meaningful_name(name: str) -> bool:
 
 
 def summarize_active_window(
-    hwnd: int, *, max_elements: int = 60, max_depth: int = 4, max_visit: int = 300
+    hwnd: int, *, max_elements: int = 80, max_depth: int = 9, max_visit: int = 600
 ) -> list[UIElement]:
     """Return a bounded list of meaningful UI elements for the given window.
 
@@ -104,7 +108,8 @@ def _walk(control, depth, max_depth, max_elements, max_visit, state, out) -> Non
                 )
             except Exception:
                 out.append(UIElement(name, control_type, 0, 0, 0, 0))
-        _walk(child, depth + 1, max_depth, max_elements, max_visit, state, out)
+        if control_type not in _SKIP_DESCENT:
+            _walk(child, depth + 1, max_depth, max_elements, max_visit, state, out)
 
 
 def format_elements(elements: list[UIElement], limit: int = 50) -> str:

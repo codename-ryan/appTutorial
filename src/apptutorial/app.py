@@ -154,6 +154,21 @@ class AppController(QObject):
         self.preview.set_status(f"Identification failed: {message}")
 
 
+def _acquire_single_instance_lock():
+    """Create a named mutex; return its handle, or None if another instance already holds it.
+
+    Prevents two copies fighting over the global hotkey. The OS releases the mutex when the
+    owning process exits (even if force-killed), so there is no stale-lock problem.
+    """
+    import ctypes
+
+    error_already_exists = 183
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, "apptutorial-single-instance")
+    if ctypes.windll.kernel32.GetLastError() == error_already_exists:
+        return None
+    return handle
+
+
 def _make_app():
     from PySide6.QtWidgets import QApplication
 
@@ -181,6 +196,16 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dpi_awareness()
     config = load_config()
+
+    if not args.check:
+        lock = _acquire_single_instance_lock()  # held for the process lifetime
+        if lock is None:
+            print(
+                "appTutorial is already running - look for the green icon in the system "
+                "tray.\nTo restart, quit the running one first (tray menu -> Quit)."
+            )
+            return 1
+
     app = _make_app()
     controller = AppController(config, app)
 
