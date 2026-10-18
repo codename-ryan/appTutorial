@@ -1,14 +1,14 @@
 """Tutorial menu: suggested tutorials (from identification) + a "type your own goal" box.
 
 Emits ``goal_chosen`` with a human-readable goal string (a suggested tutorial's title, or
-whatever the user typed). See SPEC.md §3.
+whatever the user typed). Styling comes from the parent window's stylesheet. See SPEC.md §3.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -31,17 +31,19 @@ class TutorialMenu(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         prompt = QLabel("What would you like to learn?")
-        prompt.setStyleSheet("font-weight: bold;")
+        prompt.setStyleSheet("font-weight: 600;")
         layout.addWidget(prompt)
 
         self._buttons = QVBoxLayout()
+        self._buttons.setSpacing(6)
         layout.addLayout(self._buttons)
 
         row = QHBoxLayout()
         self._custom = QLineEdit()
-        self._custom.setPlaceholderText("Or type your own goal, e.g. record a macro")
+        self._custom.setPlaceholderText("Or type your own goal…")
         self._custom.returnPressed.connect(self._emit_custom)
         start = QPushButton("Start")
+        start.setCursor(Qt.CursorShape.PointingHandCursor)
         start.clicked.connect(self._emit_custom)
         row.addWidget(self._custom)
         row.addWidget(start)
@@ -54,8 +56,9 @@ class TutorialMenu(QWidget):
             if widget is not None:
                 widget.deleteLater()
         for tutorial in ident.suggested_tutorials:
-            button = QPushButton(f"{tutorial.title}    ·  {tutorial.kind}")
-            button.setStyleSheet("text-align: left; padding: 6px;")
+            button = QPushButton(f"{tutorial.title}   ·  {tutorial.kind}")
+            button.setObjectName("tutorialBtn")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(
                 lambda _checked=False, title=tutorial.title: self.goal_chosen.emit(title)
             )
