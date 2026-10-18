@@ -1,9 +1,9 @@
 """appTutorial entry point and session orchestrator.
 
-M3: hotkey -> capture the active window -> read its UI Automation elements and identify the
-app with Claude Sonnet 5 (both off the UI thread) -> show the elements + result. Includes the
-sensitive-app denylist, tray capture indicator + pause, and local per-call telemetry. Later
-milestones add the tutorial menu and the guided step panel.
+M4: hotkey -> capture -> read UI elements + identify the app -> show a tutorial menu
+(suggested tutorials or a typed goal) -> plan the steps with Claude Sonnet 5. Includes the
+sensitive-app denylist, tray capture indicator + pause, single-instance guard, and local
+per-call telemetry. M5 turns the plan into an interactive, verified step-by-step panel.
 """
 
 from __future__ import annotations
@@ -14,14 +14,16 @@ import sys
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from apptutorial import __version__
+from apptutorial.accessibility.uia import format_elements
 from apptutorial.ai.client import AIClient
 from apptutorial.ai.identify import identify_app
+from apptutorial.ai.plan import plan_tutorial
 from apptutorial.capture.backend import CaptureBackend, get_capture_backend
 from apptutorial.config import Config, load_config
 from apptutorial.hotkey import HotkeyManager
 from apptutorial.privacy.denylist import is_denied
 from apptutorial.telemetry.logger import TelemetryLogger
-from apptutorial.ui.preview import CapturePreview
+from apptutorial.ui.session_window import SessionWindow
 from apptutorial.ui.tray import TrayIcon
 
 
@@ -42,7 +44,7 @@ class _AnalyzeTask(QRunnable):
         self.signals = _AnalyzeSignals()
 
     def run(self) -> None:
-        from apptutorial.accessibility.uia import format_elements, summarize_active_window
+        from apptutorial.accessibility.uia import summarize_active_window
 
         elements = summarize_active_window(self._window.hwnd)
         self.signals.elements.emit(elements)
@@ -62,27 +64,63 @@ class _AnalyzeTask(QRunnable):
             self.signals.identified.emit(ident)
 
 
+class _PlanSignals(QObject):
+    done = Signal(object)  # TutorialPlan
+    failed = Signal(str)
+
+
+class _PlanTask(QRunnable):
+    """Generates the tutorial plan off the UI thread."""
+
+    def __init__(self, ai: AIClient, png_bytes, goal, app_name, elements_text) -> None:
+        super().__init__()
+        self._ai = ai
+        self._png = png_bytes
+        self._goal = goal
+        self._app_name = app_name
+        self._elements_text = elements_text
+        self.signals = _PlanSignals()
+
+    def run(self) -> None:
+        try:
+            plan = plan_tutorial(
+                self._ai, self._png, self._goal, self._app_name, self._elements_text
+            )
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+        else:
+            self.signals.done.emit(plan)
+
+
 class AppController(QObject):
-    """Owns session state and wires tray, hotkey, capture, analysis, and preview."""
+    """Owns session state and drives capture -> identify -> menu -> plan."""
 
     def __init__(self, config: Config, app, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self.app = app
         self.paused = False
-        self._task: _AnalyzeTask | None = None
+        self._analyze_task: _AnalyzeTask | None = None
+        self._plan_task: _PlanTask | None = None
+
+        # Capture context, kept so planning can reuse the screenshot + elements.
+        self._window_info = None
+        self._screenshot = None
+        self._elements = None
+        self._ident = None
 
         self.telemetry = TelemetryLogger(config.telemetry_path)
         self.ai = AIClient(config.anthropic_api_key, self.telemetry)
         self.backend: CaptureBackend = get_capture_backend()
         self.tray = TrayIcon(app, config.hotkey)
         self.hotkey = HotkeyManager(config.hotkey)
-        self.preview = CapturePreview()
+        self.window = SessionWindow()
 
         self.tray.capture_requested.connect(self.trigger_capture)
         self.tray.pause_toggled.connect(self.set_paused)
         self.tray.quit_requested.connect(app.quit)
         self.hotkey.triggered.connect(self._on_hotkey)
+        self.window.goal_chosen.connect(self._on_goal_chosen)
         app.aboutToQuit.connect(self.hotkey.stop)  # unregister the global hotkey on exit
 
     def start(self) -> bool:
@@ -130,47 +168,64 @@ class AppController(QObject):
             self.tray.notify("appTutorial", f"Capture failed: {exc}")
             return
 
-        self.preview.show_capture(window, screenshot)
-        self.preview.set_status("Reading the screen...")
+        self._window_info = window
+        self._screenshot = screenshot
+        self._elements = None
+        self._ident = None
+
+        self.window.show_analyzing(window, screenshot)
         task = _AnalyzeTask(self.ai, window, screenshot)
         task.signals.elements.connect(self._on_elements)
         task.signals.identified.connect(self._on_identified)
         task.signals.failed.connect(self._on_identify_failed)
-        self._task = task  # keep a reference while it runs
+        self._analyze_task = task
         QThreadPool.globalInstance().start(task)
 
     def _on_elements(self, elements) -> None:
-        self.preview.show_elements(elements)
+        self._elements = elements
         if self.ai.available:
-            self.preview.set_status("Identifying the app with Claude Sonnet 5...")
+            self.window.set_status("Identifying the app with Claude Sonnet 5…")
         else:
-            self._task = None
-            self.preview.set_status(
-                "No API key - add ANTHROPIC_API_KEY to .env to enable identification."
+            self._analyze_task = None
+            self.window.set_status(
+                "No API key - add ANTHROPIC_API_KEY to .env to enable tutorials."
             )
 
     def _on_identified(self, ident) -> None:
-        self._task = None
-        self.preview.show_identification(ident)
+        self._analyze_task = None
+        self._ident = ident
+        self.window.show_menu(ident, len(self._elements) if self._elements else 0)
 
     def _on_identify_failed(self, message: str) -> None:
-        self._task = None
-        self.preview.set_status(f"Identification failed: {message}")
+        self._analyze_task = None
+        self.window.set_status(f"Identification failed: {message}")
 
+    def _on_goal_chosen(self, goal: str) -> None:
+        if self._screenshot is None:
+            return
+        if not self.ai.available:
+            self.window.set_status("No API key - add ANTHROPIC_API_KEY to .env.")
+            return
+        self.window.show_planning(goal)
+        app_name = (
+            self._ident.app_name
+            if self._ident is not None
+            else (self._window_info.process_name if self._window_info else "the app")
+        )
+        elements_text = format_elements(self._elements) if self._elements else None
+        task = _PlanTask(self.ai, self._screenshot.png_bytes, goal, app_name, elements_text)
+        task.signals.done.connect(self._on_planned)
+        task.signals.failed.connect(self._on_plan_failed)
+        self._plan_task = task
+        QThreadPool.globalInstance().start(task)
 
-def _acquire_single_instance_lock():
-    """Create a named mutex; return its handle, or None if another instance already holds it.
+    def _on_planned(self, plan) -> None:
+        self._plan_task = None
+        self.window.show_plan(plan)
 
-    Prevents two copies fighting over the global hotkey. The OS releases the mutex when the
-    owning process exits (even if force-killed), so there is no stale-lock problem.
-    """
-    import ctypes
-
-    error_already_exists = 183
-    handle = ctypes.windll.kernel32.CreateMutexW(None, False, "apptutorial-single-instance")
-    if ctypes.windll.kernel32.GetLastError() == error_already_exists:
-        return None
-    return handle
+    def _on_plan_failed(self, message: str) -> None:
+        self._plan_task = None
+        self.window.set_status(f"Planning failed: {message}")
 
 
 def _run_hotkey_test() -> int:
@@ -230,6 +285,21 @@ def _run_hotkey_test() -> int:
     return result
 
 
+def _acquire_single_instance_lock():
+    """Create a named mutex; return its handle, or None if another instance already holds it.
+
+    Prevents two copies fighting over the global hotkey. The OS releases the mutex when the
+    owning process exits (even if force-killed), so there is no stale-lock problem.
+    """
+    import ctypes
+
+    error_already_exists = 183
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, "apptutorial-single-instance")
+    if ctypes.windll.kernel32.GetLastError() == error_already_exists:
+        return None
+    return handle
+
+
 def _make_app():
     from PySide6.QtWidgets import QApplication
 
@@ -279,10 +349,11 @@ def main(argv: list[str] | None = None) -> int:
     controller = AppController(config, app)
 
     if args.check:
-        print(f"apptutorial {__version__} - M3 OK: capture + accessibility + identification wired.")
+        print(f"apptutorial {__version__} - M4 OK: capture + identify + menu + planning wired.")
         print(f"  api key present : {config.has_api_key}")
         print(f"  ai available    : {controller.ai.available}")
-        print(f"  identify model  : {config.identify_model}")
+        print(f"  identify/plan   : {config.identify_model}")
+        print(f"  verify          : {config.verify_model}")
         print(f"  hotkey          : {config.hotkey}  (parsed ok: {controller.hotkey.valid})")
         print(f"  backend         : {type(controller.backend).__name__}")
         print(f"  telemetry       : {config.telemetry_path}")
@@ -317,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("  WARNING: no system tray detected - the menu/indicator may not appear.")
     if not controller.ai.available:
-        print("  Note: no API key loaded - add ANTHROPIC_API_KEY to .env for identification.")
+        print("  Note: no API key loaded - add ANTHROPIC_API_KEY to .env for tutorials.")
     print("  Quit: tray menu -> Quit, or press Ctrl+C in this terminal.")
     sys.stdout.flush()
     return app.exec()

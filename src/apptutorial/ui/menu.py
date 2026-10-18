@@ -1,4 +1,67 @@
-"""Tutorial menu: suggested tutorials + a "type your own goal" box.
+"""Tutorial menu: suggested tutorials (from identification) + a "type your own goal" box.
 
-Implemented in M4. See SPEC.md §3 (v1 scope item 5).
+Emits ``goal_chosen`` with a human-readable goal string (a suggested tutorial's title, or
+whatever the user typed). See SPEC.md §3.
 """
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+if TYPE_CHECKING:
+    from apptutorial.ai.schemas import AppIdentification
+
+
+class TutorialMenu(QWidget):
+    goal_chosen = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        prompt = QLabel("What would you like to learn?")
+        prompt.setStyleSheet("font-weight: bold;")
+        layout.addWidget(prompt)
+
+        self._buttons = QVBoxLayout()
+        layout.addLayout(self._buttons)
+
+        row = QHBoxLayout()
+        self._custom = QLineEdit()
+        self._custom.setPlaceholderText("Or type your own goal, e.g. record a macro")
+        self._custom.returnPressed.connect(self._emit_custom)
+        start = QPushButton("Start")
+        start.clicked.connect(self._emit_custom)
+        row.addWidget(self._custom)
+        row.addWidget(start)
+        layout.addLayout(row)
+
+    def set_identification(self, ident: AppIdentification) -> None:
+        while self._buttons.count():
+            item = self._buttons.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for tutorial in ident.suggested_tutorials:
+            button = QPushButton(f"{tutorial.title}    ·  {tutorial.kind}")
+            button.setStyleSheet("text-align: left; padding: 6px;")
+            button.clicked.connect(
+                lambda _checked=False, title=tutorial.title: self.goal_chosen.emit(title)
+            )
+            self._buttons.addWidget(button)
+
+    def _emit_custom(self) -> None:
+        text = self._custom.text().strip()
+        if text:
+            self.goal_chosen.emit(text)
