@@ -12,6 +12,7 @@ per-call telemetry.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
@@ -26,8 +27,18 @@ from apptutorial.config import Config, load_config
 from apptutorial.hotkey import HotkeyManager
 from apptutorial.privacy.denylist import is_denied
 from apptutorial.telemetry.logger import TelemetryLogger
+from apptutorial.ui.overlay import HighlightOverlay
 from apptutorial.ui.session_window import SessionWindow
 from apptutorial.ui.tray import TrayIcon
+
+# Step-loop diagnostics go to the terminal only when APPTUTORIAL_DEBUG is set, so normal runs
+# stay quiet. Set APPTUTORIAL_DEBUG=1 to trace watching/verification.
+_DEBUG = bool(os.environ.get("APPTUTORIAL_DEBUG"))
+
+
+def _log(message: str) -> None:
+    if _DEBUG:
+        print(message, flush=True)
 
 
 class _AnalyzeSignals(QObject):
@@ -190,21 +201,33 @@ class _ResolveSignals(QObject):
 
 
 class _ResolveTask(QRunnable):
-    """Resolves a step's target element to a screen box via UIA, so tracking can focus on it."""
+    """Resolves a step's target to a screen box - a cell (Excel COM) or a control (UIA).
 
-    def __init__(self, hwnd: int, step_index: int, name_hint: str, role_hint: str | None) -> None:
+    Used both to focus change-tracking on the target and to position the highlight overlay.
+    """
+
+    def __init__(self, hwnd: int, step_index: int, step) -> None:
         super().__init__()
         self._hwnd = hwnd
         self._step_index = step_index
-        self._name_hint = name_hint
-        self._role_hint = role_hint
+        self._step = step
         self.signals = _ResolveSignals()
 
     def run(self) -> None:
-        from apptutorial.accessibility.uia import find_element_rect
-
+        rect = None
         try:
-            rect = find_element_rect(self._hwnd, self._name_hint, self._role_hint)
+            check = getattr(self._step, "check", None)
+            if check is not None and check.kind in ("cell_selected", "cell_value") and check.target:
+                from apptutorial.accessibility.excel_com import cell_rect
+
+                rect = cell_rect(check.target)
+            if rect is None:
+                target = self._step.target
+                hint = target.uia_name_hint if target else None
+                if hint:
+                    from apptutorial.accessibility.uia import find_element_rect
+
+                    rect = find_element_rect(self._hwnd, hint, target.uia_role_hint)
         except Exception:
             rect = None
         self.signals.resolved.emit(self._step_index, rect)
@@ -295,6 +318,7 @@ class AppController(QObject):
         self.tray = TrayIcon(app, config.hotkey)
         self.hotkey = HotkeyManager(config.hotkey)
         self.window = SessionWindow()
+        self.overlay = HighlightOverlay()
 
         self.tray.capture_requested.connect(self.trigger_capture)
         self.tray.pause_toggled.connect(self.set_paused)
@@ -305,6 +329,7 @@ class AppController(QObject):
         self.window.back_clicked.connect(self._on_back)
         self.window.closed.connect(self._stop_guiding)  # closing the card ends the loop
         app.aboutToQuit.connect(self.hotkey.stop)  # unregister the global hotkey on exit
+        app.aboutToQuit.connect(self.overlay.hide_box)  # don't leave a stray highlight on exit
 
     def start(self) -> bool:
         """Show the tray and register the hotkey. Returns whether the hotkey registered."""
@@ -324,7 +349,7 @@ class AppController(QObject):
         return registered
 
     def _on_hotkey(self) -> None:
-        print(f"[hotkey] {self.config.hotkey} pressed -> capturing", flush=True)
+        _log(f"[hotkey] {self.config.hotkey} pressed -> capturing")
         self.trigger_capture()
 
     def set_paused(self, paused: bool) -> None:
@@ -332,11 +357,13 @@ class AppController(QObject):
         self.tray.set_paused(paused)
         if paused:
             self._watch_timer.stop()
+            self.overlay.hide_box()
         elif self._guiding and not self._awaiting_next:
             # Resuming: re-baseline so a change made while paused doesn't false-trigger.
             self._baseline_fp = None
             self._prev_fp = None
             self.window.set_step_status("Watching your screen…")
+            self._show_overlay()
             self._watch_timer.start()
 
     def trigger_capture(self) -> None:
@@ -439,6 +466,7 @@ class AppController(QObject):
         self._step_index = index
         step = self._steps[index]
         self.window.show_step(step, index, len(self._steps))
+        self.overlay.hide_box()  # clear the previous step's highlight until the new one resolves
         # Re-baseline for the new step so its own screen state is the reference.
         self._baseline_fp = None
         self._prev_fp = None
@@ -461,40 +489,54 @@ class AppController(QObject):
                     check_desc += f":{check.target}"
                 if check.expected:
                     check_desc += f"={check.expected}"
-            print(
+            _log(
                 f"[step {index + 1}/{len(self._steps)}] watching '{w.title}' "
                 f"({w.process_name or '?'}, hwnd={w.hwnd}) [check={check_desc}]: "
-                f"{step.instruction}",
-                flush=True,
+                f"{step.instruction}"
             )
             self._resolve_target(index, step)
         if not self.paused:
             self._watch_timer.start()
 
     def _resolve_target(self, index: int, step) -> None:
-        """Kick off a best-effort UIA lookup of the step's target box (focuses tracking on it)."""
-        hint = step.target.uia_name_hint if step.target else None
-        if not hint:
-            return
-        task = _ResolveTask(self._window_info.hwnd, index, hint, step.target.uia_role_hint)
+        """Resolve the step's target box (cell via COM or control via UIA) off the UI thread.
+
+        Focuses change-tracking on the target and positions the highlight overlay.
+        """
+        task = _ResolveTask(self._window_info.hwnd, index, step)
         task.signals.resolved.connect(self._on_target_resolved)
         self._resolve_task = task
         QThreadPool.globalInstance().start(task)
 
     def _on_target_resolved(self, index: int, rect) -> None:
         self._resolve_task = None
-        if not self._guiding or index != self._step_index or rect is None:
+        if not self._guiding or index != self._step_index:
             return
         self._target_rect = rect
-        print(f"[target] step {index + 1} box = {rect}", flush=True)
+        if rect is None:
+            self.overlay.hide_box()
+            return
+        _log(f"[target] step {index + 1} box = {rect}")
         # Detection now focuses on the box; re-baseline so the switch doesn't false-trigger.
         self._baseline_fp = None
         self._prev_fp = None
+        self._show_overlay()
+
+    def _show_overlay(self) -> None:
+        if (
+            self._target_rect is not None
+            and self._window_info is not None
+            and self._guiding
+            and not self._awaiting_next
+            and not self.paused
+        ):
+            self.overlay.show_box(self._target_rect, self._window_info.scale_factor)
 
     def _stop_guiding(self) -> None:
         self._guiding = False
         self._awaiting_next = False
         self._watch_timer.stop()
+        self.overlay.hide_box()
 
     def _deterministic_check(self):
         """Return the current step's StepCheck if it can be verified locally, else None."""
@@ -532,7 +574,7 @@ class AppController(QObject):
         # AI path: fingerprint the screen and verify on a real change or the periodic heartbeat.
         self._ticks_since_verify += 1
         if self._ticks_since_verify >= self._PERIODIC_VERIFY_TICKS:
-            print("[watch] periodic check", flush=True)
+            _log("[watch] periodic check")
             self._trigger_verify()
             return
         if self._watch_in_flight:
@@ -555,17 +597,14 @@ class AppController(QObject):
         ):
             return
         if result is True:
-            print(f"[local] step {self._step_index + 1}: done", flush=True)
+            _log(f"[local] step {self._step_index + 1}: done")
             self._mark_step_done()
             return
         if result is None:
             # Undetermined for a sustained stretch -> hand this step to the AI.
             self._local_none_count += 1
             if self._local_none_count >= self._LOCAL_NONE_LIMIT:
-                print(
-                    f"[local] step {self._step_index + 1}: undetermined -> AI fallback",
-                    flush=True,
-                )
+                _log(f"[local] step {self._step_index + 1}: undetermined -> AI fallback")
                 self._ai_fallback = True
                 self._baseline_fp = None
                 self._prev_fp = None
@@ -595,10 +634,9 @@ class AppController(QObject):
             return
 
         if changed(self._baseline_fp, fingerprint) and settled(self._prev_fp, fingerprint):
-            print(
+            _log(
                 f"[watch] screen changed ({difference(self._baseline_fp, fingerprint)} bits)"
-                " -> checking",
-                flush=True,
+                " -> checking"
             )
             # Reset the baseline so we don't re-verify the same change until it moves again.
             self._baseline_fp = fingerprint
@@ -626,10 +664,9 @@ class AppController(QObject):
     def _on_verify(self, result) -> None:
         self._verifying = False
         self._verify_task = None
-        print(
+        _log(
             f"[verify] step {self._verify_step_index + 1}: {result.status} "
-            f"(conf {result.confidence:.2f}) - {result.observation}",
-            flush=True,
+            f"(conf {result.confidence:.2f}) - {result.observation}"
         )
         # Ignore a result that arrives after the user manually moved to another step.
         if not self._guiding or self._awaiting_next or self._verify_step_index != self._step_index:
@@ -645,13 +682,14 @@ class AppController(QObject):
         """Step looks complete: stop watching and let the user confirm with the green button."""
         self._awaiting_next = True
         self._watch_timer.stop()
+        self.overlay.hide_box()  # step done; drop the highlight while awaiting confirmation
         is_last = self._step_index + 1 >= len(self._steps)
         self.window.show_step_done(is_last)
 
     def _on_verify_failed(self, message: str) -> None:
         self._verifying = False
         self._verify_task = None
-        print(f"[verify] failed: {message}", flush=True)
+        _log(f"[verify] failed: {message}")
         if self._guiding:
             self.window.set_step_status("Watching your screen… (last check failed)")
 
@@ -671,6 +709,7 @@ class AppController(QObject):
         self._completed = False
         self._guiding = False
         self._awaiting_next = False
+        self.overlay.hide_box()
         if self._ident is not None:
             self.window.show_menu(self._ident, len(self._elements) if self._elements else 0)
         else:
@@ -808,14 +847,18 @@ def main(argv: list[str] | None = None) -> int:
     controller = AppController(config, app)
 
     if args.check:
-        print(f"apptutorial {__version__} - M5 OK: capture + identify + menu + plan + verify.")
+        print(
+            f"apptutorial {__version__} - OK: capture + identify + menu + plan + "
+            "hybrid verify (local/AI) + highlight overlay."
+        )
         print(f"  api key present : {config.has_api_key}")
         print(f"  ai available    : {controller.ai.available}")
         print(f"  identify/plan   : {config.identify_model}")
-        print(f"  verify          : {config.verify_model}")
+        print(f"  verify (fallbk) : {config.verify_model}")
         print(f"  hotkey          : {config.hotkey}  (parsed ok: {controller.hotkey.valid})")
         print(f"  backend         : {type(controller.backend).__name__}")
         print(f"  telemetry       : {config.telemetry_path}")
+        print(f"  debug logging   : {_DEBUG}")
         return 0
 
     import signal

@@ -35,6 +35,39 @@ def selection_address() -> str | None:
         pythoncom.CoUninitialize()
 
 
+def cell_rect(ref: str) -> tuple[int, int, int, int] | None:
+    """Screen box (left, top, width, height) in physical pixels of a cell, or None.
+
+    Uses Excel's own point->screen-pixel conversion, so it tracks the live scroll position.
+    Lets the highlight overlay frame a cell the same way it frames a ribbon control.
+    """
+    if not ref:
+        return None
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception:
+        return None
+
+    pythoncom.CoInitialize()
+    try:
+        app = win32com.client.GetActiveObject("Excel.Application")
+        cell = app.Range(ref)
+        win = app.ActiveWindow
+        left = win.PointsToScreenPixelsX(cell.Left)
+        top = win.PointsToScreenPixelsY(cell.Top)
+        right = win.PointsToScreenPixelsX(cell.Left + cell.Width)
+        bottom = win.PointsToScreenPixelsY(cell.Top + cell.Height)
+        width, height = int(right - left), int(bottom - top)
+        if width <= 0 or height <= 0:
+            return None
+        return (int(left), int(top), width, height)
+    except Exception:
+        return None
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def cell_text(ref: str) -> tuple[str, str] | None:
     """Return (value, formula) of a cell as strings, or None if Excel isn't reachable."""
     if not ref:

@@ -8,8 +8,9 @@ do, and walks you through it step by step in a side panel — verifying each ste
 what's actually on your screen, so the guidance always matches the version in front of
 you.
 
-- **Status:** pre-build (spec + plan). v1 not yet implemented.
-- **Last updated:** 2026-10-15
+- **Status:** v1 implemented (M0–M6): capture → identify → menu → plan → guided steps with
+  hybrid (local + AI) verification and a highlight overlay. Excel is the deeply-tested app.
+- **Last updated:** 2026-10-18
 - **Owner:** @codename-ryan
 
 ---
@@ -47,8 +48,9 @@ that is always grounded in the current screenshot — never a remembered or outd
 - Identify the active application and the user's likely intent from a screenshot + process name.
 - Offer a tutorial menu: a basic tour, feature tutorials, project tutorials, or a user-typed goal.
 - Deliver guided, one-step-at-a-time instructions in a side panel.
-- Verify step completion automatically by watching the screen and re-checking with a fast model.
-- Highlight where to click with a see-through overlay aligned to the real UI (phase 2).
+- Verify step completion automatically: deterministic local checks (Excel COM / UIA) first,
+  with a fast vision model as fallback for visual steps.
+- Highlight where to focus with a see-through, click-through overlay aligned to the real UI.
 - Answer free-text questions and offer per-step help: Simpler / More detail / Why? / I'm
   stuck / What can I do here (phase 2).
 - Log model/token/latency telemetry locally, with an optional Sentry adapter — never
@@ -79,19 +81,26 @@ that is always grounded in the current screenshot — never a remembered or outd
    description, "done" condition).
 7. Step side panel: one step at a time (instruction + what "done" looks like), Next/Back,
    session progress.
-8. Screen-change detection (local perceptual hash / frame diff) gating a verification call.
-9. Step verification via **Claude Haiku 4.5** → structured JSON (done / not done / unclear /
-   off-track + hint). Advance or hint accordingly.
-10. UI Automation (UIA) introduced as a **grounding** aid: element names/roles/bounds are
-    read and passed to the models to improve identification, planning, and verification
-    accuracy. (Drawing the highlight box is phase 2.)
-11. Local JSONL telemetry: per-call model, token usage, latency, step index. No screenshots,
+8. Screen-change detection (local perceptual average-hash over the target region) gating AI
+   verification so frames are never streamed to the API.
+9. **Hybrid step verification.** For steps whose completion is a well-defined state, a
+   deterministic local check runs every ~0.8s with **no AI call**: Excel cell state
+   (selection, value/formula) via the **Excel COM** object model, and control state (tab
+   selected, dialog/pane open, checkbox on, field focused) via **UIA**. Visual steps — and
+   any local check that can't be determined — fall back to **Claude Haiku 4.5** vision
+   verification (full screenshot + a close-up of the target + a UIA summary). A detected step
+   is confirmed by the user with a green **Next** button (no silent auto-advance); Back and
+   manual Next always work.
+10. UI Automation (UIA) **grounding**: element names/roles/bounds are read and passed to the
+    models to improve identification, planning, and verification accuracy.
+11. **See-through highlight overlay** framing the current step's target — a cell (via Excel
+    COM point→pixel conversion) or a control (via UIA bounds). Click-through, never steals
+    focus, excluded from screen capture, and DPI-aligned (physical bounds ÷ scale factor).
+12. Local JSONL telemetry: per-call model, token usage, latency, step index. No screenshots,
     no prompt bodies.
-12. First deeply-tested target app: **Microsoft Excel** (others still work generically).
+13. First deeply-tested target app: **Microsoft Excel** (others still work generically).
 
 ### Phase 2
-- See-through **highlight overlay** drawn at UIA-reported element bounds (vision-coordinate
-  fallback where UIA is thin), aligned across monitors and DPI.
 - Per-step help buttons (**Simpler / More detail / Why? / I'm stuck / What can I do here**)
   and the free-text question box.
 - **Recap card** at the end of a tutorial.
@@ -167,17 +176,21 @@ appTutorial/
       change_detector.py    # perceptual hash / frame diff → "screen changed?"
       backend.py            # CaptureBackend interface (Windows impl now; Mac later)
     accessibility/
-      uia.py                # UI Automation element tree, names/roles/bounds
+      uia.py                # UI Automation element tree, names/roles/bounds, element rect
+      local_check.py        # deterministic step checks (UIA + Excel COM), no AI
+      excel_com.py          # Excel object model: selection, cell value/formula, cell rect
     ai/
       client.py             # Anthropic client wrapper (+ telemetry hooks)
-      schemas.py            # Pydantic models for structured outputs
+      schemas.py            # Pydantic models for structured outputs (incl. StepCheck)
       identify.py           # app identification (Sonnet 5)
       plan.py               # tutorial planning (Sonnet 5)
-      verify.py             # step verification (Haiku 4.5)
+      verify.py             # step verification fallback (Haiku 4.5)
     ui/
       tray.py               # tray icon, capture indicator, pause toggle
       menu.py               # tutorial menu
-      panel.py              # step side panel
+      session_window.py     # floating card: analyzing / menu / step panel host
+      panel.py              # step side panel (one step, Back / Why? / Next, green confirm)
+      overlay.py            # see-through, click-through highlight overlay
     privacy/
       denylist.py           # sensitive-app blocklist + checks
     telemetry/
@@ -217,18 +230,25 @@ Claude's vision is strong at *understanding* a screen but unreliable at returnin
 pixel-perfect bounding boxes for small UI elements. Windows UI Automation exposes the
 **exact** rectangle and name/role of real UI elements. The hybrid strategy:
 
-- **v1:** read the UIA element tree for the active window (names, control types, bounds) and
-  pass a compact summary to the models. This grounds identification ("the ribbon has
-  Formulas/Data/Review tabs"), planning ("target: Formulas tab"), and verification ("is the
-  Formulas tab now selected?"). No box is drawn yet.
-- **Phase 2:** the overlay draws its highlight at the UIA-reported bounds of the element
-  Claude selected. Where UIA coverage is thin (some IDEs, in-browser content), fall back to
-  Claude's vision coordinates, and always pair the box with a text anchor so a slightly-off
-  box is still useful.
+- **Grounding (v1):** read the UIA element tree for the active window (names, control types,
+  bounds) and pass a compact summary to the models. This grounds identification ("the ribbon
+  has Formulas/Data/Review tabs"), planning ("target: Formulas tab"), and verification ("is
+  the Formulas tab now selected?").
+- **Deterministic verification (v1):** control state is read straight from UIA
+  (`SelectionItemPattern.IsSelected`, `TogglePattern.ToggleState`, `ValuePattern.Value`,
+  focus) so a step like "the Developer tab is selected" is checked exactly, with no AI call.
+- **Highlight overlay (v1):** the overlay draws its frame at the UIA-reported bounds of the
+  target element. For Excel cells (which live in a skipped grid subtree), bounds come from
+  **Excel COM** (`Window.PointsToScreenPixelsX/Y`) instead.
+
+**Excel COM:** for the v1 target app, cell state is read from Excel's own object model
+(`Selection.Address`, `Range(ref).Value/.Formula`, cell screen rect) — exact and reliable
+where UIA/vision are weak. Returns nothing when Excel isn't reachable (not running, mid cell
+edit, Excel Online), so verification falls back to UIA/vision.
 
 UIA coverage by app: Excel/Office — excellent; browsers — partial (web content via
-UIA/IA2); Android Studio (JetBrains/Java) — partial. This is why vision fallback and text
-anchors matter.
+UIA/IA2); Android Studio (JetBrains/Java) — partial. This is why the COM path (Excel) and
+vision fallback matter.
 
 ---
 
@@ -247,6 +267,12 @@ access — see CLAUDE.md for setup).
 - **Structured outputs:** every call uses JSON-schema-constrained output via Pydantic models
   and `client.messages.parse(..., output_format=Model)` → `response.parsed_output`. This
   guarantees machine-readable results (step = instruction + target + "done" definition).
+- **Hybrid verification (local-first):** the planner also emits a machine-checkable `check`
+  per step (see §8.1). When the completion state is well-defined (a cell selected/filled, a
+  tab selected, a dialog open, a box checked), the tight loop verifies it **locally** (Excel
+  COM / UIA) with no API call — faster, free, and exact. Only `visual` steps, or local checks
+  that can't be determined, reach the Haiku vision call. This keeps AI usage to planning plus
+  the genuinely visual checks.
 - **Streaming:** user-facing text (e.g. step explanations) streams to the panel for
   responsiveness; the expensive vision call still fires only on a detected screen change.
 - **Prompt caching (phase 2 optimization):** the large, stable system prompts for
@@ -290,11 +316,25 @@ access — see CLAUDE.md for setup).
         "uia_role_hint": "Button"
       },
       "done_when": "The \"Record Macro\" dialog is open",
-      "done_signals": ["a dialog titled Record Macro is visible"]
+      "done_signals": ["a dialog titled Record Macro is visible"],
+      "check": { "kind": "element_present", "target": "Record Macro", "expected": null }
     }
   ]
 }
 ```
+
+**StepCheck** (part of each step; drives local, no-AI verification):
+```jsonc
+{
+  // kind: cell_selected | cell_value | element_selected | element_present |
+  //       element_focused | checkbox_checked | value_equals | visual
+  "kind": "cell_value",
+  "target": "A11",            // cell ref (cell_*) or element name (element_*/checkbox/value)
+  "expected": "=SUM(A1:A10)"  // value/formula for cell_value & value_equals; else null
+}
+```
+`cell_selected`/`cell_value` are checked via Excel COM; the element/checkbox/value kinds via
+UIA; `visual` (or any undetermined local check) falls back to the Haiku vision check.
 
 **StepVerification** (Haiku 4.5):
 ```jsonc
@@ -317,13 +357,18 @@ IDLE
         └─(allowed)→ CAPTURE → IDENTIFYING (Sonnet 5)
                         └→ MENU
                              └─(pick tutorial / type goal)→ PLANNING (Sonnet 5)
-                                   └→ GUIDING(step i)
-                                        ├─(screen change)→ VERIFYING (Haiku 4.5)
-                                        │     ├─ done → GUIDING(step i+1) | COMPLETE
+                                   └→ GUIDING(step i)  [highlight overlay on target]
+                                        ├─ local check (Excel COM / UIA, every ~0.8s, no AI)
+                                        │     ├─ done → AWAIT_CONFIRM (green Next)
+                                        │     ├─ not done → keep watching
+                                        │     └─ undetermined (xN) → AI fallback ↓
+                                        ├─(screen change / heartbeat, visual steps)→ VERIFYING (Haiku 4.5)
+                                        │     ├─ done → AWAIT_CONFIRM (green Next)
                                         │     ├─ not_done/off_track → show hint, stay
                                         │     └─ unclear → wait / allow manual advance
                                         └─(pause)→ PAUSED → (resume) GUIDING(step i)
-COMPLETE → IDLE        (recap card = phase 2)
+AWAIT_CONFIRM ─(user clicks Next)→ GUIDING(step i+1) | COMPLETE
+COMPLETE → "Back to tutorials" → MENU        (recap card = phase 2)
 PAUSED: all capture + API calls halted until resumed.
 ```
 
