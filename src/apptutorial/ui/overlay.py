@@ -14,7 +14,7 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-_ACCENT = QColor("#4C6FFF")  # vivid indigo frame
+_ACCENT = QColor("#16A34A")  # vivid green frame
 
 
 class HighlightOverlay(QWidget):

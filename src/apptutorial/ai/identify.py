@@ -20,8 +20,8 @@ what is visible in the screenshot and the accessibility elements. Never assume m
 or features from other versions of the app - describe only what you can actually see. When the \
 accessibility element list is provided, treat those names as authoritative labels.
 
-Then propose 2-5 tutorials tailored to this app and what's on screen. Each tutorial needs a \
-kebab-case id, a short title, and a kind:
+ALWAYS fill suggested_tutorials with 2-4 entries (never leave it empty) - tutorials tailored to \
+this app and what's on screen. Each tutorial needs a kebab-case id, a short title, and a kind:
 - "tour": a basic overview of what the app is and how to use it
 - "feature": how to use one specific capability (e.g. macros, formulas)
 - "project": an end-to-end goal the user might want to accomplish

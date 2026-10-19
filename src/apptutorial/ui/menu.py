@@ -55,16 +55,30 @@ class TutorialMenu(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        for tutorial in ident.suggested_tutorials:
-            button = QPushButton(f"{tutorial.title}   ·  {tutorial.kind}")
+
+        options = [(t.title, t.kind) for t in ident.suggested_tutorials]
+        if not options:
+            # Smaller open-weight models sometimes skip the nested suggestions; always offer
+            # sensible, actionable defaults so the user still has tutorials to pick from.
+            options = _default_options(ident.app_name)
+
+        for title, kind in options:
+            button = QPushButton(f"{title}   ·  {kind}")
             button.setObjectName("tutorialBtn")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(
-                lambda _checked=False, title=tutorial.title: self.goal_chosen.emit(title)
-            )
+            button.clicked.connect(lambda _checked=False, goal=title: self.goal_chosen.emit(goal))
             self._buttons.addWidget(button)
 
     def _emit_custom(self) -> None:
         text = self._custom.text().strip()
         if text:
             self.goal_chosen.emit(text)
+
+
+def _default_options(app_name: str | None) -> list[tuple[str, str]]:
+    app = app_name or "this app"
+    return [
+        (f"Give me a basic tour of {app}", "tour"),
+        ("Show me what I can do on this screen", "feature"),
+        (f"Walk me through a common task in {app}", "project"),
+    ]
