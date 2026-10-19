@@ -1,8 +1,23 @@
-import pytest
+import base64
+import io
 
-from apptutorial.ai.client import AIClient, AIError, image_content_block
+import pytest
+from PIL import Image
+
+from apptutorial.ai.client import _MAX_IMAGE_EDGE, AIClient, AIError, image_content_block
 from apptutorial.ai.schemas import AppIdentification
 from apptutorial.telemetry.logger import TelemetryLogger
+
+
+def _png(size):
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (10, 20, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _decode(block):
+    b64 = block["image_url"]["url"].split(",", 1)[1]
+    return Image.open(io.BytesIO(base64.b64decode(b64)))
 
 
 def test_unavailable_without_backend(tmp_path):
@@ -22,6 +37,16 @@ def test_parse_without_backend_raises(tmp_path):
 
 
 def test_image_content_block_is_openai_data_uri():
-    block = image_content_block(b"\x89PNG-bytes")
+    block = image_content_block(_png((40, 30)))
     assert block["type"] == "image_url"
     assert block["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_content_block_downscales_large_screenshot():
+    block = image_content_block(_png((2560, 1440)))
+    assert max(_decode(block).size) <= _MAX_IMAGE_EDGE
+
+
+def test_image_content_block_leaves_small_image_untouched():
+    block = image_content_block(_png((640, 480)))
+    assert _decode(block).size == (640, 480)

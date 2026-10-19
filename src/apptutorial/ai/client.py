@@ -11,14 +11,36 @@ persisted. With a local backend the screenshots never leave the machine at all. 
 from __future__ import annotations
 
 import base64
+import io
 import time
 from typing import Any, TypeVar
 
+from PIL import Image
 from pydantic import BaseModel, ValidationError
 
 from apptutorial.telemetry.logger import TelemetryLogger
 
 T = TypeVar("T", bound=BaseModel)
+
+# Downscale screenshots before sending them to the model. A full-resolution window shot gives a
+# local vision model far too much to process (very slow, and it can blow past the request
+# timeout); ~1280px keeps UI text legible while cutting inference time dramatically. Models
+# downscale internally anyway, so accuracy barely changes.
+_MAX_IMAGE_EDGE = 1280
+
+
+def _downscale_png(png_bytes: bytes) -> bytes:
+    try:
+        image = Image.open(io.BytesIO(png_bytes))
+        if max(image.size) <= _MAX_IMAGE_EDGE:
+            return png_bytes
+        image = image.convert("RGB")
+        image.thumbnail((_MAX_IMAGE_EDGE, _MAX_IMAGE_EDGE))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception:
+        return png_bytes  # send the original if anything goes wrong
 
 
 class AIError(RuntimeError):
@@ -26,8 +48,8 @@ class AIError(RuntimeError):
 
 
 def image_content_block(png_bytes: bytes) -> dict[str, Any]:
-    """An OpenAI-style image content block carrying the PNG as an inline data URI."""
-    b64 = base64.standard_b64encode(png_bytes).decode("ascii")
+    """An OpenAI-style image content block carrying a (downscaled) PNG as an inline data URI."""
+    b64 = base64.standard_b64encode(_downscale_png(png_bytes)).decode("ascii")
     return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
 
 
@@ -47,9 +69,10 @@ class AIClient:
             from openai import OpenAI
         except Exception:
             return
-        # Local inference can be slow, so allow a generous timeout. The api_key is unused by
-        # local backends (Ollama); a placeholder keeps the SDK happy.
-        self._client = OpenAI(base_url=base_url, api_key=api_key or "not-needed", timeout=120.0)
+        # Local inference can be slow (first call also loads the model into memory), so allow a
+        # generous timeout. The api_key is unused by local backends (Ollama); a placeholder keeps
+        # the SDK happy.
+        self._client = OpenAI(base_url=base_url, api_key=api_key or "not-needed", timeout=300.0)
 
     @property
     def available(self) -> bool:
