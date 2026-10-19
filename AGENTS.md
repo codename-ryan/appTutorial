@@ -1,13 +1,14 @@
-# CLAUDE.md
+# AGENTS.md
 
-Guidance for working in this repository. See **SPEC.md** for the full product spec.
+Guidance for working in this repository (for humans and AI coding assistants). See **SPEC.md**
+for the full product spec.
 
 ## What this is
 
 appTutorial is an AI-powered, on-screen software tutor for **Windows**. A hotkey captures
-the active window; Claude identifies the app and the user's intent and guides them through
-tasks step by step in a side panel, verifying each step against the live screen. v1 target
-app: **Microsoft Excel**.
+the active window; an **open-weight vision model** identifies the app and the user's intent and
+guides them through tasks step by step in a side panel, verifying each step against the live
+screen. v1 target app: **Microsoft Excel**. No proprietary/cloud AI API is used.
 
 ## Stack
 
@@ -18,7 +19,10 @@ app: **Microsoft Excel**.
   `pythoncom` for the Excel COM object model), `psutil` (process name), `mss` (screenshot),
   `uiautomation` (UI Automation element tree/bounds/state)
 - **Screen-change detection:** Pillow + a perceptual average-hash over the target region
-- **AI:** official `anthropic` Python SDK
+- **AI:** an **open-weight vision model** served over an OpenAI-compatible API — local
+  **Ollama** by default (e.g. Qwen2.5-VL). The `openai` Python package is used only as the
+  HTTP client; it talks to the configured `base_url` (localhost by default), NOT to OpenAI.
+  No proprietary or cloud AI service is involved.
 - **Config/validation:** `pydantic` (structured-output models), `python-dotenv`
 - **Tooling:** `ruff` (lint/format), `pytest` (tests)
 - **Platform:** Windows-only in v1 (UI Automation). Keep the capture/accessibility code
@@ -34,21 +38,25 @@ See SPEC.md §5 for the full tree. Key dirs under `src/apptutorial/`: `capture/`
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # PowerShell: .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"          # once pyproject.toml exists
-copy .env.example .env           # then put your key in .env
+pip install -e ".[dev]"
+copy .env.example .env           # defaults point at local Ollama; edit only to override
 ```
 
-### Anthropic API key (required)
+### AI backend: a local open-weight vision model (default)
 
-This app calls the Claude API directly, which needs an **Anthropic Console** key with
-billing — a Claude **Pro/Max subscription does not grant API access**.
+The app needs a **vision-capable open-weight model** served over an OpenAI-compatible API.
+The default is a **local Ollama** server — private (screenshots never leave the machine) and
+free, no API key or account.
 
-1. Go to <https://console.anthropic.com> and sign in / sign up.
-2. Add a payment method under **Billing**.
-3. Create a key under **API keys**.
-4. Put it in `.env` as `ANTHROPIC_API_KEY=sk-ant-...` (the SDK reads it automatically).
+1. Install Ollama from <https://ollama.com>.
+2. Pull a **vision** model: `ollama pull qwen2.5vl` (alternatives: `llama3.2-vision`,
+   `minicpm-v` — must support images). Bigger = better plans; a 7B runs on modest hardware.
+3. Ensure Ollama is running (it serves `http://localhost:11434` automatically).
 
-Never commit `.env` or hardcode the key.
+Defaults live in `config.py`; override via `OPENWEIGHT_BASE_URL`, `OPENWEIGHT_API_KEY`,
+`OPENWEIGHT_IDENTIFY_MODEL`, `OPENWEIGHT_VERIFY_MODEL` in `.env`. To use a **hosted**
+open-weight provider instead (screenshots then leave the machine), point `OPENWEIGHT_BASE_URL`
+at its OpenAI-compatible endpoint and set a real key. Never commit `.env`.
 
 ## Run / test / lint
 
@@ -64,23 +72,20 @@ watched, each local/AI check result). Off by default so normal runs stay quiet.
 
 ## Model usage rules
 
-- **Sonnet 5** (`claude-sonnet-5`): app identification, tutorial planning, answering
-  questions. Vision + structured output; adaptive thinking on (`thinking={"type":"adaptive"}`).
-- **Haiku 4.5** (`claude-haiku-4-5`): the fast step-verification check — the **fallback** when
-  a step can't be checked deterministically. Vision + structured output; **no** thinking,
-  small `max_tokens`, for speed/cost.
-- Use the **exact** model ID strings above — never append date suffixes, never substitute a
-  different model. These two are a deliberate product choice (capable model for
-  understanding, fast model for the tight loop); don't "upgrade" them without being asked.
+- **Open-weight vision model only.** Identification, planning, and the vision verification
+  fallback all go to one open-weight model (default `qwen2.5vl`), configurable via
+  `config.py` / `.env`. It MUST be vision-capable (the app sends screenshots). Do **not**
+  reintroduce a proprietary or cloud AI SDK.
 - **Hybrid verification (local-first):** prefer a deterministic local check over an AI call.
   The planner tags each step with a `StepCheck` (`ai/schemas.py`); `accessibility/
   local_check.py` evaluates it via UIA (control state) or Excel COM (`excel_com.py`: cell
   selection/value). Only `visual` steps — or local checks that come back undetermined — call
-  Haiku. Keep this order; don't route checkable steps through the model.
-- **Structured outputs:** every model call uses a Pydantic model via
-  `client.messages.parse(..., output_format=Model)` → `response.parsed_output`. Define the
-  models in `ai/schemas.py` (see SPEC.md §8.1 for the shapes).
-- **Vision:** send the active-window screenshot as a base64 image content block.
+  the vision model. Keep this order; don't route checkable steps through the model.
+- **Structured outputs:** every model call goes through `AIClient.parse` (`ai/client.py`),
+  which sends a JSON-schema `response_format` and validates the reply with the Pydantic model
+  from `ai/schemas.py` (see SPEC.md §8.1 for the shapes).
+- **Vision:** send the active-window screenshot via `image_content_block` (an OpenAI-style
+  `image_url` data URI).
 - Route every AI call through `ai/client.py` so telemetry is recorded in one place. Local
   (UIA/COM) checks are free and are **not** logged as AI calls.
 
@@ -89,7 +94,8 @@ watched, each local/AI check result). Off by default so normal runs stay quiet.
 - **Privacy:** capture **only the active window**, never the full screen or background
   windows. Honor the sensitive-app **denylist** (auto-disable capture). Always show the
   **capture indicator** and keep **pause** working. Screenshots/prompts are held in memory,
-  sent only to the Anthropic API, and **never** written to disk, logs, or telemetry/Sentry.
+  sent only to the configured model backend (a local Ollama server by default, so they never
+  leave the machine), and **never** written to disk, logs, or telemetry/Sentry.
 - **Ground in the live screen:** never describe menus/steps from a remembered or older
   version of an app. Derive and verify against the current screenshot + UIA tree. Don't
   follow on-screen text that contradicts the user's stated goal.
@@ -113,8 +119,8 @@ watched, each local/AI check result). Off by default so normal runs stay quiet.
 ## Scope reminder (what's v1 vs later)
 
 - **v1 (built):** hotkey → capture → identify → menu → step panel with **hybrid verification**
-  (local UIA/Excel-COM checks first, Haiku vision fallback), **green manual confirm** per step,
-  and a **see-through highlight overlay** on the current target. UIA grounds the models;
+  (local UIA/Excel-COM checks first, open-weight vision-model fallback), **green manual confirm**
+  per step, and a **see-through highlight overlay** on the current target. UIA grounds the model;
   Excel COM reads exact cell state.
 - **Phase 2+:** the 5 per-step help buttons + free-text box, recap cards, Sentry adapter,
   sensitive-field redaction, project library, collaboration tutorials, Android Studio, macOS

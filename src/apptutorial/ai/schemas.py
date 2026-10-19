@@ -1,4 +1,4 @@
-"""Pydantic models for Claude structured outputs.
+"""Pydantic models for the model's structured (JSON-schema) outputs.
 
 M2 defines the identification schema; TutorialPlan (M4) and StepVerification (M5) are added
 in their milestones. See SPEC.md §8.1 for the full shapes.

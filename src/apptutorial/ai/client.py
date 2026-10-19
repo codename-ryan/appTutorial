@@ -1,16 +1,20 @@
-"""Anthropic client wrapper: the single choke point for all Claude calls.
+"""AI client wrapper: the single choke point for all model calls.
 
-Routes every request through one place so model/token/latency telemetry is recorded
-consistently and screenshots/prompts are never persisted. See SPEC.md §8 and §11.
+Talks to an OpenAI-compatible endpoint, which is how open-weight vision models are almost
+always served - locally via Ollama (default) or vLLM/llama.cpp, or a hosted open-weight
+provider (OpenRouter, Together, Groq, ...). Routes every request through one place so
+model/token/latency telemetry is recorded consistently and screenshots/prompts are never
+persisted. With a local backend the screenshots never leave the machine at all. See SPEC.md
+§8 and §11.
 """
 
 from __future__ import annotations
 
+import base64
 import time
 from typing import Any, TypeVar
 
-import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from apptutorial.telemetry.logger import TelemetryLogger
 
@@ -18,19 +22,38 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class AIError(RuntimeError):
-    """Any failure talking to Claude (no key, network/API error, refusal, bad output)."""
+    """Any failure talking to the model (no backend, network/API error, or bad output)."""
+
+
+def image_content_block(png_bytes: bytes) -> dict[str, Any]:
+    """An OpenAI-style image content block carrying the PNG as an inline data URI."""
+    b64 = base64.standard_b64encode(png_bytes).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
 
 
 class AIClient:
-    """Thin wrapper over the Anthropic SDK with structured output + telemetry."""
+    """Thin wrapper over the OpenAI SDK (pointed at an open-weight backend) with structured
+    output + telemetry."""
 
-    def __init__(self, api_key: str | None, telemetry: TelemetryLogger) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key) if api_key else None
+    def __init__(
+        self, base_url: str | None, api_key: str | None, telemetry: TelemetryLogger
+    ) -> None:
         self._telemetry = telemetry
+        self._base_url = base_url
+        self._client = None
+        if not base_url:
+            return
+        try:
+            from openai import OpenAI
+        except Exception:
+            return
+        # Local inference can be slow, so allow a generous timeout. The api_key is unused by
+        # local backends (Ollama); a placeholder keeps the SDK happy.
+        self._client = OpenAI(base_url=base_url, api_key=api_key or "not-needed", timeout=120.0)
 
     @property
     def available(self) -> bool:
-        """True if an API key is configured and a client was created."""
+        """True if a backend URL is configured and the SDK is importable."""
         return self._client is not None
 
     def parse(
@@ -42,51 +65,55 @@ class AIClient:
         output_model: type[T],
         max_tokens: int = 1024,
         system: str | None = None,
-        thinking: dict[str, Any] | None = None,
         step_index: int | None = None,
     ) -> T:
-        """Call messages.parse and return the validated structured output.
-
-        Raises AIError on any failure. Always records a telemetry event.
-        """
+        """Call the chat endpoint with a JSON-schema response format and return the validated
+        structured output. Raises AIError on any failure. Always records a telemetry event."""
         if self._client is None:
-            raise AIError("No ANTHROPIC_API_KEY configured. Add it to .env to enable AI features.")
+            raise AIError(
+                "No AI backend configured. Set OPENWEIGHT_BASE_URL in .env "
+                "(default is a local Ollama server at http://localhost:11434/v1)."
+            )
 
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-            "output_format": output_model,
-        }
+        full_messages: list[dict[str, Any]] = []
         if system is not None:
-            kwargs["system"] = system
-        if thinking is not None:
-            kwargs["thinking"] = thinking
+            full_messages.append({"role": "system", "content": system})
+        full_messages.extend(messages)
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": output_model.__name__,
+                "schema": output_model.model_json_schema(),
+            },
+        }
 
         start = time.monotonic()
         status = "ok"
-        response = None
+        input_tokens = output_tokens = 0
         try:
-            response = self._client.messages.parse(**kwargs)
-            if response.stop_reason == "refusal":
-                status = "refusal"
-                raise AIError("The model declined this request.")
-            result = _extract_parsed(response, output_model)
+            completion = self._client.chat.completions.create(
+                model=model,
+                messages=full_messages,
+                max_tokens=max_tokens,
+                temperature=0,
+                response_format=response_format,
+            )
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                output_tokens = getattr(usage, "completion_tokens", 0) or 0
+            content = completion.choices[0].message.content or ""
+            result = _validate(content, output_model)
         except AIError:
-            if status != "refusal":
-                status = "error"
+            status = "error"
             raise
         except Exception as exc:  # network / API / validation
             status = "error"
-            raise AIError(str(exc)) from exc
+            raise AIError(f"{type(exc).__name__}: {exc}") from exc
         else:
             return result
         finally:
-            input_tokens = output_tokens = 0
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                input_tokens = usage.input_tokens or 0
-                output_tokens = usage.output_tokens or 0
             self._telemetry.log(
                 model=model,
                 call_type=call_type,
@@ -98,11 +125,16 @@ class AIClient:
             )
 
 
-def _extract_parsed(response: Any, output_model: type[T]) -> T:
-    """Pull the validated model off the response's text block (SDK 1.x shape)."""
-    for block in response.content:
-        if getattr(block, "type", None) == "text":
-            parsed = getattr(block, "parsed_output", None)
-            if isinstance(parsed, output_model):
-                return parsed
-    raise AIError("Model response did not contain the expected structured output.")
+def _validate(content: str, output_model: type[T]) -> T:
+    """Validate the model's text as the Pydantic model, tolerating stray prose/code fences."""
+    try:
+        return output_model.model_validate_json(content)
+    except ValidationError:
+        pass
+    start, end = content.find("{"), content.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return output_model.model_validate_json(content[start : end + 1])
+        except ValidationError as exc:
+            raise AIError(f"model returned JSON that didn't match the schema: {exc}") from exc
+    raise AIError("model did not return JSON output")

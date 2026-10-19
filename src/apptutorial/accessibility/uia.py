@@ -12,6 +12,8 @@ content into the summary. Coverage varies by app; any failure degrades to an emp
 from __future__ import annotations
 
 import os
+import re
+from collections import deque
 from dataclasses import dataclass
 
 # Interactive / chrome control types worth surfacing to the model. Deliberately excludes
@@ -178,6 +180,83 @@ def _search_rect(control, depth, max_depth, max_visit, state, target, role):
             found = _search_rect(child, depth + 1, max_depth, max_visit, state, target, role)
             if found:
                 return found
+    return None
+
+
+def find_cell_header_rects(
+    hwnd: int, cell_ref: str
+) -> tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
+    """Screen boxes of a cell's column header and row header, e.g. A5 -> ('A' box, '5' box).
+
+    Excel's worksheet is a UIA DataGrid whose row 0 is the column headers and column 0 the row
+    headers (GetItem(0,0) is the Select-All corner). Using GridPattern.GetItem is a fast, native
+    lookup - no slow tree walk - and the bounds come from the same UIA tree (and captured window)
+    that makes ribbon highlighting accurate. Highlighting both headers points a cross-hair at the
+    cell and is far more robust than a single tiny cell box. Returns (None, None) on failure;
+    either header is None if it has scrolled out of the visible grid.
+    """
+    match = re.match(r"\$?([A-Za-z]{1,3})\$?([0-9]{1,7})", (cell_ref or "").strip())
+    if not match:
+        return (None, None)
+    col, row = match.group(1).upper(), match.group(2)
+    try:
+        import uiautomation as auto
+    except Exception:
+        return (None, None)
+    try:
+        auto.Logger.SetLogFile(os.devnull)
+    except Exception:
+        pass
+
+    try:
+        with auto.UIAutomationInitializerInThread():
+            root = auto.ControlFromHandle(hwnd)
+            if root is None:
+                return (None, None)
+            grid = _find_grid(root)
+            if grid is None:
+                return (None, None)
+            pattern = grid.GetGridPattern()
+            if pattern is None:
+                return (None, None)
+            row_count, col_count = pattern.RowCount, pattern.ColumnCount
+            col_rect = _scan_header(pattern, col, col_count, is_column=True)
+            row_rect = _scan_header(pattern, row, row_count, is_column=False)
+            return (col_rect, row_rect)
+    except Exception:
+        return (None, None)
+
+
+def _find_grid(root, max_nodes: int = 400):
+    """Breadth-first search for the worksheet element that supports GridPattern."""
+    queue = deque([(root, 0)])
+    seen = 0
+    while queue and seen < max_nodes:
+        control, depth = queue.popleft()
+        seen += 1
+        try:
+            if control.GetGridPattern() is not None:
+                return control
+        except Exception:
+            pass
+        if depth < 8:
+            try:
+                queue.extend((child, depth + 1) for child in control.GetChildren())
+            except Exception:
+                pass
+    return None
+
+
+def _scan_header(pattern, name, count, *, is_column):
+    for i in range(1, count):  # index 0 is the Select-All corner
+        try:
+            item = pattern.GetItem(0, i) if is_column else pattern.GetItem(i, 0)
+            if (item.Name or "").strip() == name:
+                r = item.BoundingRectangle
+                if r.width() > 0 and r.height() > 0:
+                    return (r.left, r.top, r.width(), r.height())
+        except Exception:
+            continue
     return None
 
 

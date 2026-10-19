@@ -1,1 +1,1 @@
-"""Claude integration: client wrapper, structured-output schemas, and call sites."""
+"""AI integration (open-weight vision model): client wrapper, schemas, and call sites."""

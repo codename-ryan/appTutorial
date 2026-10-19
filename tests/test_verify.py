@@ -26,7 +26,7 @@ def _step():
     )
 
 
-def test_verify_step_routes_to_haiku_with_step_index():
+def test_verify_step_routes_to_model_with_step_index():
     result = StepVerification(status="done", confidence=0.9, observation="Ribbon is shown.")
     client = _FakeClient(result)
 
@@ -47,8 +47,8 @@ def test_verify_step_sends_screenshot_as_image_block():
     verify_step(client, b"fake-png-bytes", _step(), "Microsoft Excel")
 
     content = client.calls[0]["messages"][0]["content"]
-    assert content[0]["type"] == "image"
-    assert content[0]["source"]["media_type"] == "image/png"
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert content[1]["type"] == "text"
 
 

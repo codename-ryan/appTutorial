@@ -1,4 +1,4 @@
-"""App identification (Claude Sonnet 5 -> AppIdentification).
+"""App identification (open-weight vision model -> AppIdentification).
 
 Takes the active-window screenshot + process name + (optionally) a UI Automation element
 summary, and returns the app, category, on-screen context, and suggested tutorials.
@@ -7,9 +7,7 @@ See SPEC.md §8.
 
 from __future__ import annotations
 
-import base64
-
-from apptutorial.ai.client import AIClient
+from apptutorial.ai.client import AIClient, image_content_block
 from apptutorial.ai.schemas import AppIdentification
 from apptutorial.config import IDENTIFY_MODEL
 
@@ -42,8 +40,8 @@ def identify_app(
     png_bytes: bytes,
     process_name: str,
     elements_text: str | None = None,
+    model: str = IDENTIFY_MODEL,
 ) -> AppIdentification:
-    image_b64 = base64.standard_b64encode(png_bytes).decode("ascii")
     text = _USER_TEXT.format(process=process_name or "(unknown)")
     if elements_text:
         text += (
@@ -53,21 +51,11 @@ def identify_app(
     messages = [
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": image_b64,
-                    },
-                },
-                {"type": "text", "text": text},
-            ],
+            "content": [image_content_block(png_bytes), {"type": "text", "text": text}],
         }
     ]
     return client.parse(
-        model=IDENTIFY_MODEL,
+        model=model,
         call_type="identify",
         system=_SYSTEM,
         messages=messages,

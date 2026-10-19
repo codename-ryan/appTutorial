@@ -2,16 +2,22 @@ from apptutorial.config import DEFAULT_DENYLIST, load_config
 
 
 def test_load_config_defaults(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("APPTUTORIAL_HOTKEY", raising=False)
-    monkeypatch.delenv("APPTUTORIAL_DENYLIST", raising=False)
+    for var in (
+        "OPENWEIGHT_BASE_URL",
+        "OPENWEIGHT_IDENTIFY_MODEL",
+        "OPENWEIGHT_VERIFY_MODEL",
+        "APPTUTORIAL_HOTKEY",
+        "APPTUTORIAL_DENYLIST",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
     cfg = load_config()
 
     assert cfg.hotkey == "ctrl+shift+t"
     assert cfg.denylist == DEFAULT_DENYLIST
-    assert cfg.identify_model == "claude-sonnet-5"
-    assert cfg.verify_model == "claude-haiku-4-5"
+    assert cfg.openweight_base_url == "http://localhost:11434/v1"
+    assert cfg.identify_model == "qwen2.5vl"
+    assert cfg.backend_configured is True
 
 
 def test_denylist_override(monkeypatch):

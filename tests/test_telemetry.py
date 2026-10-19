@@ -8,7 +8,7 @@ def test_log_writes_jsonl_without_screen_content(tmp_path):
     logger = TelemetryLogger(path)
 
     logger.log(
-        model="claude-sonnet-5",
+        model="qwen2.5vl",
         call_type="identify",
         input_tokens=120,
         output_tokens=45,
@@ -19,7 +19,7 @@ def test_log_writes_jsonl_without_screen_content(tmp_path):
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     event = json.loads(lines[0])
-    assert event["model"] == "claude-sonnet-5"
+    assert event["model"] == "qwen2.5vl"
     assert event["call_type"] == "identify"
     assert event["input_tokens"] == 120
     assert event["output_tokens"] == 45

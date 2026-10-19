@@ -1,16 +1,14 @@
-"""Step verification (Claude Haiku 4.5 -> StepVerification).
+"""Step verification (open-weight vision model -> StepVerification).
 
-The fast "did they do the step?" check, run when the screen changes (or on a periodic
-heartbeat). Judges the current step from a fresh screenshot plus the live accessibility
-(UIA) element list, which is reliable ground truth for control states that are easy to miss
-in a screenshot. See SPEC.md §8.
+The fallback "did they do the step?" check, run when the deterministic local check can't decide
+and the screen changes (or on a periodic heartbeat). Judges the current step from a fresh
+screenshot plus the live accessibility (UIA) element list, which is reliable ground truth for
+control states that are easy to miss in a screenshot. See SPEC.md §8.
 """
 
 from __future__ import annotations
 
-import base64
-
-from apptutorial.ai.client import AIClient
+from apptutorial.ai.client import AIClient, image_content_block
 from apptutorial.ai.schemas import StepVerification, TutorialStep
 from apptutorial.config import VERIFY_MODEL
 
@@ -36,17 +34,6 @@ reasonable equivalents. When not done or off track, give one short, specific hin
 concrete action. Keep observation to one sentence naming the concrete evidence you used."""
 
 
-def _image_block(png_bytes: bytes) -> dict:
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": "image/png",
-            "data": base64.standard_b64encode(png_bytes).decode("ascii"),
-        },
-    }
-
-
 def verify_step(
     client: AIClient,
     png_bytes: bytes,
@@ -54,13 +41,14 @@ def verify_step(
     app_name: str,
     elements_text: str | None = None,
     crop_png_bytes: bytes | None = None,
+    model: str = VERIFY_MODEL,
 ) -> StepVerification:
     signals = ", ".join(step.done_signals) or "(none)"
-    content: list[dict] = [_image_block(png_bytes)]
+    content: list[dict] = [image_content_block(png_bytes)]
     if crop_png_bytes:
         caption = f"Close-up of the target ({step.target.description}):"
         content.append({"type": "text", "text": caption})
-        content.append(_image_block(crop_png_bytes))
+        content.append(image_content_block(crop_png_bytes))
     text = (
         f"App: {app_name}\n"
         f"Step instruction: {step.instruction}\n"
@@ -77,7 +65,7 @@ def verify_step(
     content.append({"type": "text", "text": text})
     messages = [{"role": "user", "content": content}]
     return client.parse(
-        model=VERIFY_MODEL,
+        model=model,
         call_type="verify",
         system=_SYSTEM,
         messages=messages,

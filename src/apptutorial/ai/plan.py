@@ -1,4 +1,4 @@
-"""Tutorial planning (Claude Sonnet 5 -> TutorialPlan).
+"""Tutorial planning (open-weight vision model -> TutorialPlan).
 
 Turns a chosen tutorial or a typed goal into ordered, structured steps grounded in the
 current screenshot + accessibility elements. See SPEC.md §8.
@@ -6,9 +6,7 @@ current screenshot + accessibility elements. See SPEC.md §8.
 
 from __future__ import annotations
 
-import base64
-
-from apptutorial.ai.client import AIClient
+from apptutorial.ai.client import AIClient, image_content_block
 from apptutorial.ai.schemas import TutorialPlan
 from apptutorial.config import IDENTIFY_MODEL
 
@@ -66,8 +64,8 @@ def plan_tutorial(
     goal: str,
     app_name: str,
     elements_text: str | None = None,
+    model: str = IDENTIFY_MODEL,
 ) -> TutorialPlan:
-    image_b64 = base64.standard_b64encode(png_bytes).decode("ascii")
     text = (
         f"Application: {app_name}\n"
         f"The user's goal: {goal}\n\n"
@@ -81,21 +79,11 @@ def plan_tutorial(
     messages = [
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": image_b64,
-                    },
-                },
-                {"type": "text", "text": text},
-            ],
+            "content": [image_content_block(png_bytes), {"type": "text", "text": text}],
         }
     ]
     return client.parse(
-        model=IDENTIFY_MODEL,
+        model=model,
         call_type="plan",
         system=_SYSTEM,
         messages=messages,

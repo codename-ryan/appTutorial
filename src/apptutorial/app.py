@@ -1,12 +1,12 @@
 """appTutorial entry point and session orchestrator.
 
 Flow: hotkey -> capture the active window -> read UI elements + identify the app -> show a
-tutorial menu (suggested tutorials or a typed goal) -> plan the steps with Claude Sonnet 5 ->
-guide the user one step at a time. Each step is verified with a hybrid check: a deterministic
-local UIA check when the step's completion is a well-defined state (a tab selected, a dialog
-open, a cell selected), falling back to a Claude Haiku vision check for visual steps. Includes
-the sensitive-app denylist, tray capture indicator + pause, single-instance guard, and local
-per-call telemetry.
+tutorial menu (suggested tutorials or a typed goal) -> plan the steps with an open-weight vision
+model -> guide the user one step at a time. Each step is verified with a hybrid check: a
+deterministic local check (UIA / Excel COM) when the step's completion is a well-defined state (a
+tab selected, a dialog open, a cell selected), falling back to the vision model for visual steps.
+Includes the sensitive-app denylist, tray capture indicator + pause, single-instance guard, and
+local per-call telemetry.
 """
 
 from __future__ import annotations
@@ -84,11 +84,12 @@ class _AnalyzeSignals(QObject):
 class _AnalyzeTask(QRunnable):
     """Reads the window's accessibility elements, then identifies the app - off the UI thread."""
 
-    def __init__(self, ai: AIClient, window, screenshot) -> None:
+    def __init__(self, ai: AIClient, window, screenshot, model: str) -> None:
         super().__init__()
         self._ai = ai
         self._window = window
         self._screenshot = screenshot
+        self._model = model
         self.signals = _AnalyzeSignals()
 
     def run(self) -> None:
@@ -105,6 +106,7 @@ class _AnalyzeTask(QRunnable):
                 self._screenshot.png_bytes,
                 self._window.process_name,
                 format_elements(elements) if elements else None,
+                model=self._model,
             )
         except Exception as exc:  # delivered to the UI thread as a failure message
             self.signals.failed.emit(str(exc))
@@ -120,19 +122,25 @@ class _PlanSignals(QObject):
 class _PlanTask(QRunnable):
     """Generates the tutorial plan off the UI thread."""
 
-    def __init__(self, ai: AIClient, png_bytes, goal, app_name, elements_text) -> None:
+    def __init__(self, ai: AIClient, png_bytes, goal, app_name, elements_text, model: str) -> None:
         super().__init__()
         self._ai = ai
         self._png = png_bytes
         self._goal = goal
         self._app_name = app_name
         self._elements_text = elements_text
+        self._model = model
         self.signals = _PlanSignals()
 
     def run(self) -> None:
         try:
             plan = plan_tutorial(
-                self._ai, self._png, self._goal, self._app_name, self._elements_text
+                self._ai,
+                self._png,
+                self._goal,
+                self._app_name,
+                self._elements_text,
+                model=self._model,
             )
         except Exception as exc:
             self.signals.failed.emit(str(exc))
@@ -183,10 +191,16 @@ class _VerifySignals(QObject):
 
 
 class _VerifyTask(QRunnable):
-    """Captures a fresh screenshot of the target window and asks Haiku if the step is done."""
+    """Captures a fresh screenshot of the target window and asks the vision model if done."""
 
     def __init__(
-        self, ai: AIClient, hwnd: int, step, app_name: str, rect: tuple | None = None
+        self,
+        ai: AIClient,
+        hwnd: int,
+        step,
+        app_name: str,
+        rect: tuple | None = None,
+        model: str = "",
     ) -> None:
         super().__init__()
         self._ai = ai
@@ -194,6 +208,7 @@ class _VerifyTask(QRunnable):
         self._step = step
         self._app_name = app_name
         self._rect = rect  # target box, for a focused close-up image
+        self._model = model
         self.signals = _VerifySignals()
 
     def run(self) -> None:
@@ -222,7 +237,13 @@ class _VerifyTask(QRunnable):
             except Exception:
                 elements_text = None
             result = verify_step(
-                self._ai, shot.png_bytes, self._step, self._app_name, elements_text, crop
+                self._ai,
+                shot.png_bytes,
+                self._step,
+                self._app_name,
+                elements_text,
+                crop,
+                model=self._model,
             )
         except Exception as exc:
             self.signals.failed.emit(str(exc))
@@ -231,13 +252,13 @@ class _VerifyTask(QRunnable):
 
 
 class _ResolveSignals(QObject):
-    resolved = Signal(int, object)  # (step_index, rect-or-None)
+    resolved = Signal(int, object)  # (step_index, list-of-boxes)
 
 
 class _ResolveTask(QRunnable):
-    """Resolves a step's target to a screen box - a cell (Excel COM) or a control (UIA).
-
-    Used both to focus change-tracking on the target and to position the highlight overlay.
+    """Resolves a step's target to highlight boxes - a cell's row+column headers (UIA GridPattern)
+    or a single control (UIA element bounds). Both come from the captured window, like the ribbon
+    highlight that already lines up.
     """
 
     def __init__(self, hwnd: int, step_index: int, step) -> None:
@@ -248,42 +269,44 @@ class _ResolveTask(QRunnable):
         self.signals = _ResolveSignals()
 
     def run(self) -> None:
-        rect = None
+        boxes: list = []
         try:
             ref = _cell_ref_of_step(self._step)
             if ref:
-                from apptutorial.accessibility.excel_com import cell_rect
+                from apptutorial.accessibility.uia import find_cell_header_rects
 
-                rect = cell_rect(ref)  # cell steps: COM only, never a stray element
+                col_rect, row_rect = find_cell_header_rects(self._hwnd, ref)
+                boxes = [col_rect, row_rect]
             else:
                 target = self._step.target
                 hint = target.uia_name_hint if target else None
                 if hint:
                     from apptutorial.accessibility.uia import find_element_rect
 
-                    rect = find_element_rect(self._hwnd, hint, target.uia_role_hint)
+                    boxes = [find_element_rect(self._hwnd, hint, target.uia_role_hint)]
         except Exception:
-            rect = None
-        self.signals.resolved.emit(self._step_index, rect)
+            boxes = []
+        self.signals.resolved.emit(self._step_index, boxes)
 
 
 class _CellRectTask(QRunnable):
-    """Re-reads a cell's screen box (Excel COM) so the highlight can track scrolling."""
+    """Re-reads a cell's header boxes (UIA GridPattern) so the highlight tracks scrolling."""
 
-    def __init__(self, step_index: int, ref: str) -> None:
+    def __init__(self, hwnd: int, step_index: int, ref: str) -> None:
         super().__init__()
+        self._hwnd = hwnd
         self._step_index = step_index
         self._ref = ref
         self.signals = _ResolveSignals()
 
     def run(self) -> None:
-        from apptutorial.accessibility.excel_com import cell_rect
+        from apptutorial.accessibility.uia import find_cell_header_rects
 
         try:
-            rect = cell_rect(self._ref)
+            col_rect, row_rect = find_cell_header_rects(self._hwnd, self._ref)
         except Exception:
-            rect = None
-        self.signals.resolved.emit(self._step_index, rect)
+            col_rect, row_rect = None, None
+        self.signals.resolved.emit(self._step_index, [col_rect, row_rect])
 
 
 class _LocalCheckSignals(QObject):
@@ -337,7 +360,7 @@ class AppController(QObject):
         self._ident = None
 
         # Interactive-step state (M5). The watch loop fingerprints the target window and only
-        # calls Haiku to verify once the screen has changed and settled.
+        # calls the vision model to verify once the screen has changed and settled.
         self._plan = None
         self._steps: list = []
         self._step_index = 0
@@ -350,7 +373,8 @@ class AppController(QObject):
         self._ticks_since_verify = 0  # safety net: verify periodically even without a change
         self._baseline_fp = None
         self._prev_fp = None
-        self._target_rect = None  # screen box of the current step's target element (if resolved)
+        self._target_rect = None  # single box for AI crop/fingerprint focus (element steps)
+        self._overlay_boxes: list = []  # boxes currently highlighted (1 control, or 2 headers)
         # Deterministic local-check path (hybrid verification): poll UIA state for checkable
         # steps; fall back to AI only when the local check can't determine the answer.
         self._ai_fallback = False
@@ -368,16 +392,17 @@ class AppController(QObject):
         self._watch_timer.timeout.connect(self._tick)
         # Cell highlights must follow scrolling, so re-read the cell's screen box frequently.
         self._overlay_timer = QTimer(self)
-        self._overlay_timer.setInterval(300)
+        self._overlay_timer.setInterval(200)
         self._overlay_timer.timeout.connect(self._refresh_overlay)
 
         self.telemetry = TelemetryLogger(config.telemetry_path)
-        self.ai = AIClient(config.anthropic_api_key, self.telemetry)
+        self.ai = AIClient(config.openweight_base_url, config.openweight_api_key, self.telemetry)
         self.backend: CaptureBackend = get_capture_backend()
         self.tray = TrayIcon(app, config.hotkey)
         self.hotkey = HotkeyManager(config.hotkey)
         self.window = SessionWindow()
-        self.overlay = HighlightOverlay()
+        # Two overlays: a cell step highlights its column header AND its row header.
+        self.overlays = [HighlightOverlay(), HighlightOverlay()]
 
         self.tray.capture_requested.connect(self.trigger_capture)
         self.tray.pause_toggled.connect(self.set_paused)
@@ -388,7 +413,7 @@ class AppController(QObject):
         self.window.back_clicked.connect(self._on_back)
         self.window.closed.connect(self._stop_guiding)  # closing the card ends the loop
         app.aboutToQuit.connect(self.hotkey.stop)  # unregister the global hotkey on exit
-        app.aboutToQuit.connect(self.overlay.hide_box)  # don't leave a stray highlight on exit
+        app.aboutToQuit.connect(self._hide_overlays)  # don't leave a stray highlight on exit
 
     def start(self) -> bool:
         """Show the tray and register the hotkey. Returns whether the hotkey registered."""
@@ -417,7 +442,7 @@ class AppController(QObject):
         if paused:
             self._watch_timer.stop()
             self._overlay_timer.stop()
-            self.overlay.hide_box()
+            self._hide_overlays()
         elif self._guiding and not self._awaiting_next:
             # Resuming: re-baseline so a change made while paused doesn't false-trigger.
             self._baseline_fp = None
@@ -456,7 +481,7 @@ class AppController(QObject):
         self._ident = None
 
         self.window.show_analyzing(window, screenshot)
-        task = _AnalyzeTask(self.ai, window, screenshot)
+        task = _AnalyzeTask(self.ai, window, screenshot, self.config.identify_model)
         task.signals.elements.connect(self._on_elements)
         task.signals.identified.connect(self._on_identified)
         task.signals.failed.connect(self._on_identify_failed)
@@ -466,11 +491,12 @@ class AppController(QObject):
     def _on_elements(self, elements) -> None:
         self._elements = elements
         if self.ai.available:
-            self.window.set_status("Identifying the app with Claude Sonnet 5…")
+            self.window.set_status(f"Identifying the app with {self.config.identify_model}…")
         else:
             self._analyze_task = None
             self.window.set_status(
-                "No API key - add ANTHROPIC_API_KEY to .env to enable tutorials."
+                "AI backend unavailable - is the model server running? "
+                "Check OPENWEIGHT_BASE_URL in .env."
             )
 
     def _on_identified(self, ident) -> None:
@@ -486,7 +512,7 @@ class AppController(QObject):
         if self._screenshot is None:
             return
         if not self.ai.available:
-            self.window.set_status("No API key - add ANTHROPIC_API_KEY to .env.")
+            self.window.set_status("AI backend unavailable - check OPENWEIGHT_BASE_URL in .env.")
             return
         self.window.show_planning(goal)
         app_name = (
@@ -495,7 +521,14 @@ class AppController(QObject):
             else (self._window_info.process_name if self._window_info else "the app")
         )
         elements_text = format_elements(self._elements) if self._elements else None
-        task = _PlanTask(self.ai, self._screenshot.png_bytes, goal, app_name, elements_text)
+        task = _PlanTask(
+            self.ai,
+            self._screenshot.png_bytes,
+            goal,
+            app_name,
+            elements_text,
+            self.config.identify_model,
+        )
         task.signals.done.connect(self._on_planned)
         task.signals.failed.connect(self._on_plan_failed)
         self._plan_task = task
@@ -508,7 +541,7 @@ class AppController(QObject):
         app_name = plan.app_name or (self._ident.app_name if self._ident else "the app")
         self.window.begin_steps(plan.goal, app_name)
         if not self._steps:
-            self.window.set_status("Claude didn't return any steps - try a different goal.")
+            self.window.set_status("The model didn't return any steps - try a different goal.")
             return
         self._start_step(0)
 
@@ -528,7 +561,7 @@ class AppController(QObject):
         self._step_index = index
         step = self._steps[index]
         self.window.show_step(step, index, len(self._steps))
-        self.overlay.hide_box()  # clear the previous step's highlight until the new one resolves
+        self._hide_overlays()  # clear the previous step's highlight until the new one resolves
         # Re-baseline for the new step so its own screen state is the reference.
         self._baseline_fp = None
         self._prev_fp = None
@@ -575,34 +608,42 @@ class AppController(QObject):
         self._resolve_task = task
         QThreadPool.globalInstance().start(task)
 
-    def _on_target_resolved(self, index: int, rect) -> None:
+    def _on_target_resolved(self, index: int, boxes) -> None:
         self._resolve_task = None
         if not self._guiding or index != self._step_index:
             return
-        self._target_rect = rect
-        if rect is None:
-            self.overlay.hide_box()
+        live = [b for b in (boxes or []) if b]
+        self._overlay_boxes = live
+        # A single control box doubles as the AI crop/fingerprint focus; header pairs don't.
+        self._target_rect = live[0] if len(live) == 1 else None
+        _log(f"[target] step {index + 1} boxes = {live}")
+        if not live:
+            self._hide_overlays()
             return
-        _log(f"[target] step {index + 1} box = {rect}")
-        # Detection now focuses on the box; re-baseline so the switch doesn't false-trigger.
         self._baseline_fp = None
         self._prev_fp = None
         self._show_overlay()
 
     def _show_overlay(self) -> None:
-        if (
-            self._target_rect is not None
-            and self._guiding
-            and not self._awaiting_next
-            and not self.paused
-        ):
-            self.overlay.show_box(self._target_rect)
+        if self._guiding and not self._awaiting_next and not self.paused:
+            self._show_overlay_boxes(self._overlay_boxes)
+
+    def _show_overlay_boxes(self, boxes) -> None:
+        for i, overlay in enumerate(self.overlays):
+            if i < len(boxes) and boxes[i]:
+                overlay.show_box(boxes[i])
+            else:
+                overlay.hide_box()
+
+    def _hide_overlays(self) -> None:
+        for overlay in self.overlays:
+            overlay.hide_box()
 
     def _is_cell_step(self) -> bool:
         return bool(self._steps and _cell_ref_of_step(self._steps[self._step_index]))
 
     def _refresh_overlay(self) -> None:
-        """Re-read the current cell's screen box so the highlight tracks scrolling."""
+        """Re-read the current cell's header boxes so the highlight tracks scrolling."""
         ref = _cell_ref_of_step(self._steps[self._step_index]) if self._steps else None
         if (
             not self._guiding
@@ -614,28 +655,26 @@ class AppController(QObject):
         ):
             return
         self._overlay_in_flight = True
-        task = _CellRectTask(self._step_index, ref)
+        task = _CellRectTask(self._window_info.hwnd, self._step_index, ref)
         task.signals.resolved.connect(self._on_overlay_rect)
         self._cell_rect_task = task
         QThreadPool.globalInstance().start(task)
 
-    def _on_overlay_rect(self, index: int, rect) -> None:
+    def _on_overlay_rect(self, index: int, boxes) -> None:
         self._overlay_in_flight = False
         self._cell_rect_task = None
         if not self._guiding or index != self._step_index or self._awaiting_next or self.paused:
             return
-        self._target_rect = rect
-        if rect is None:
-            self.overlay.hide_box()  # cell scrolled out of view
-        else:
-            self.overlay.show_box(rect)
+        live = [b for b in (boxes or []) if b]
+        self._overlay_boxes = live
+        self._show_overlay_boxes(live)  # shows live boxes, hides the rest (scrolled off)
 
     def _stop_guiding(self) -> None:
         self._guiding = False
         self._awaiting_next = False
         self._watch_timer.stop()
         self._overlay_timer.stop()
-        self.overlay.hide_box()
+        self._hide_overlays()
 
     def _deterministic_check(self):
         """Return the current step's StepCheck if it can be verified locally, else None."""
@@ -647,13 +686,8 @@ class AppController(QObject):
         return check
 
     def _tick(self) -> None:
-        if (
-            not self._guiding
-            or self.paused
-            or self._verifying
-            or self._awaiting_next
-            or self._window_info is None
-        ):
+        # Keeps running while awaiting confirmation too, so an undo reverts the "looks good".
+        if not self._guiding or self.paused or self._verifying or self._window_info is None:
             return
 
         # Hybrid verification: for a checkable step, poll UIA state locally (fast, no AI).
@@ -670,12 +704,14 @@ class AppController(QObject):
                 QThreadPool.globalInstance().start(task)
             return
 
-        # AI path: fingerprint the screen and verify on a real change or the periodic heartbeat.
-        self._ticks_since_verify += 1
-        if self._ticks_since_verify >= self._PERIODIC_VERIFY_TICKS:
-            _log("[watch] periodic check")
-            self._trigger_verify()
-            return
+        # AI path: fingerprint the screen and verify on a real change. The periodic heartbeat is
+        # suppressed while awaiting confirmation (change-detection alone catches an undo).
+        if not self._awaiting_next:
+            self._ticks_since_verify += 1
+            if self._ticks_since_verify >= self._PERIODIC_VERIFY_TICKS:
+                _log("[watch] periodic check")
+                self._trigger_verify()
+                return
         if self._watch_in_flight:
             return
         self._watch_in_flight = True
@@ -688,41 +724,36 @@ class AppController(QObject):
         self._local_in_flight = False
         self._local_task = None
         # Ignore a result that arrives after the user manually moved to another step.
-        if (
-            not self._guiding
-            or self.paused
-            or self._awaiting_next
-            or self._local_for_index != self._step_index
-        ):
+        if not self._guiding or self.paused or self._local_for_index != self._step_index:
             return
         if result is True:
-            _log(f"[local] step {self._step_index + 1}: done")
-            self._mark_step_done()
+            if not self._awaiting_next:
+                _log(f"[local] step {self._step_index + 1}: done")
+                self._mark_step_done()
             return
         if result is None:
-            # Undetermined for a sustained stretch -> hand this step to the AI.
-            self._local_none_count += 1
-            if self._local_none_count >= self._LOCAL_NONE_LIMIT:
-                _log(f"[local] step {self._step_index + 1}: undetermined -> AI fallback")
-                self._ai_fallback = True
-                self._baseline_fp = None
-                self._prev_fp = None
-                self._ticks_since_verify = 0
+            # Undetermined (e.g. Excel busy mid-edit). Don't revert on this; only count toward
+            # AI fallback while still actively watching.
+            if not self._awaiting_next:
+                self._local_none_count += 1
+                if self._local_none_count >= self._LOCAL_NONE_LIMIT:
+                    _log(f"[local] step {self._step_index + 1}: undetermined -> AI fallback")
+                    self._ai_fallback = True
+                    self._baseline_fp = None
+                    self._prev_fp = None
+                    self._ticks_since_verify = 0
             return
-        # result is False: the deterministic channel works, just not done yet - reset the counter.
+        # result is False: the step is not (or no longer) done.
         self._local_none_count = 0
-        self.window.set_step_status("Watching your screen…")
+        if self._awaiting_next:
+            self._revert_step_done()  # the user undid it - go back to actively guiding
+        else:
+            self.window.set_step_status("Watching your screen…")
 
     def _on_watch(self, fingerprint) -> None:
         self._watch_in_flight = False
         self._watch_task = None
-        if (
-            not self._guiding
-            or self.paused
-            or self._verifying
-            or self._awaiting_next
-            or fingerprint is None
-        ):
+        if not self._guiding or self.paused or self._verifying or fingerprint is None:
             return
 
         from apptutorial.capture.change_detector import changed, difference, settled
@@ -753,7 +784,12 @@ class AppController(QObject):
         self.window.set_step_status("Checking…")
         step = self._steps[self._step_index]
         task = _VerifyTask(
-            self.ai, self._window_info.hwnd, step, self._current_app_name(), self._target_rect
+            self.ai,
+            self._window_info.hwnd,
+            step,
+            self._current_app_name(),
+            self._target_rect,
+            self.config.verify_model,
         )
         task.signals.done.connect(self._on_verify)
         task.signals.failed.connect(self._on_verify_failed)
@@ -768,23 +804,47 @@ class AppController(QObject):
             f"(conf {result.confidence:.2f}) - {result.observation}"
         )
         # Ignore a result that arrives after the user manually moved to another step.
-        if not self._guiding or self._awaiting_next or self._verify_step_index != self._step_index:
+        if not self._guiding or self._verify_step_index != self._step_index:
             return
         if result.status == "done" and result.confidence >= 0.5:
-            self._mark_step_done()
+            if not self._awaiting_next:
+                self._mark_step_done()
+            return
+        # Not done. If we were showing "looks good", the user undid it - revert.
+        if self._awaiting_next:
+            if result.status in ("not_done", "off_track"):
+                self._revert_step_done()
             return
         if result.status in ("not_done", "off_track") and result.hint:
             self.window.show_hint(result.hint)
         self.window.set_step_status("Watching your screen…")
 
     def _mark_step_done(self) -> None:
-        """Step looks complete: stop watching and let the user confirm with the green button."""
+        """Step looks complete: show the green confirm button, but keep monitoring so that
+        undoing it (e.g. deselecting the cell) reverts back to actively guiding the step."""
+        if self._awaiting_next:
+            return
         self._awaiting_next = True
-        self._watch_timer.stop()
         self._overlay_timer.stop()
-        self.overlay.hide_box()  # step done; drop the highlight while awaiting confirmation
+        self._hide_overlays()  # drop the highlight while it looks done
+        self._ticks_since_verify = 0
         is_last = self._step_index + 1 >= len(self._steps)
         self.window.show_step_done(is_last)
+        # The watch/local timer keeps running so an undo is noticed.
+
+    def _revert_step_done(self) -> None:
+        """The step no longer looks done (the user undid it) - return to actively guiding it."""
+        if not self._awaiting_next:
+            return
+        self._awaiting_next = False
+        _log(f"[revert] step {self._step_index + 1}: no longer done -> watching")
+        step = self._steps[self._step_index]
+        self.window.show_step(step, self._step_index, len(self._steps))
+        self._target_rect = None
+        self._hide_overlays()
+        self._resolve_target(self._step_index, step)
+        if not self.paused and self._is_cell_step():
+            self._overlay_timer.start()
 
     def _on_verify_failed(self, message: str) -> None:
         self._verifying = False
@@ -810,7 +870,7 @@ class AppController(QObject):
         self._guiding = False
         self._awaiting_next = False
         self._overlay_timer.stop()
-        self.overlay.hide_box()
+        self._hide_overlays()
         if self._ident is not None:
             self.window.show_menu(self._ident, len(self._elements) if self._elements else 0)
         else:
@@ -952,12 +1012,12 @@ def main(argv: list[str] | None = None) -> int:
             f"apptutorial {__version__} - OK: capture + identify + menu + plan + "
             "hybrid verify (local/AI) + highlight overlay."
         )
-        print(f"  api key present : {config.has_api_key}")
+        print(f"  ai backend url  : {config.openweight_base_url}")
         print(f"  ai available    : {controller.ai.available}")
         print(f"  identify/plan   : {config.identify_model}")
         print(f"  verify (fallbk) : {config.verify_model}")
         print(f"  hotkey          : {config.hotkey}  (parsed ok: {controller.hotkey.valid})")
-        print(f"  backend         : {type(controller.backend).__name__}")
+        print(f"  capture backend : {type(controller.backend).__name__}")
         print(f"  telemetry       : {config.telemetry_path}")
         print(f"  debug logging   : {_DEBUG}")
         return 0
@@ -991,7 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("  WARNING: no system tray detected - the menu/indicator may not appear.")
     if not controller.ai.available:
-        print("  Note: no API key loaded - add ANTHROPIC_API_KEY to .env for tutorials.")
+        print("  Note: AI backend not configured - set OPENWEIGHT_BASE_URL in .env.")
     print("  Quit: tray menu -> Quit, or press Ctrl+C in this terminal.")
     sys.stdout.flush()
     return app.exec()

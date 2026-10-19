@@ -3,7 +3,7 @@
 **An AI-powered, on-screen software tutor for Windows.**
 
 Press a hotkey on any confusing app (Excel, an IDE, a web app). appTutorial captures
-the active window, uses Claude to figure out what the app is and what you're trying to
+the active window, uses an open-weight vision model to figure out what the app is and what you're trying to
 do, and walks you through it step by step in a side panel — verifying each step against
 what's actually on your screen, so the guidance always matches the version in front of
 you.
@@ -34,11 +34,13 @@ that is always grounded in the current screenshot — never a remembered or outd
    against the user's stated goal.
 2. **Privacy by default.** Only the focused window is ever captured. Sensitive apps are
    blocked. Screenshots and prompts are never written to logs or external telemetry. A
-   capture indicator and pause control are always available.
+   capture indicator and pause control are always available. The AI is an **open-weight model
+   run locally by default**, so screenshots need never leave the machine.
 3. **Teach, don't just click.** The goal is for the user to learn the software, not to be
    driven blindly. Steps explain *what* and (on request) *why*.
-4. **Right model for the job.** A capable model for understanding and planning; a fast,
-   cheap model for the tight "did they do it yet?" loop.
+4. **Open weights, local first.** One open-weight vision model (served over an OpenAI-compatible
+   API, default local Ollama) does understanding, planning, and the vision fallback. The tight
+   "did they do it yet?" loop is deterministic and local (UIA / Excel COM) - no AI call at all.
 
 ---
 
@@ -74,11 +76,11 @@ that is always grounded in the current screenshot — never a remembered or outd
    scale, and an active-window-only screenshot normalized for scale factor.
 3. Privacy: active-window-only capture, configurable sensitive-app denylist (capture
    auto-disables), always-visible capture indicator, and a pause control.
-4. App identification via **Claude Sonnet 5** → structured JSON (app, category, on-screen
-   context, suggested tutorials).
+4. App identification via an **open-weight vision model** → structured JSON (app, category,
+   on-screen context, suggested tutorials).
 5. Tutorial menu: basic tour / feature tutorials / project tutorials / type-your-own-goal.
-6. Tutorial planning via **Claude Sonnet 5** → structured JSON steps (instruction, target
-   description, "done" condition).
+6. Tutorial planning via the **open-weight vision model** → structured JSON steps (instruction,
+   target description, "done" condition).
 7. Step side panel: one step at a time (instruction + what "done" looks like), Next/Back,
    session progress.
 8. Screen-change detection (local perceptual average-hash over the target region) gating AI
@@ -87,8 +89,8 @@ that is always grounded in the current screenshot — never a remembered or outd
    deterministic local check runs every ~0.8s with **no AI call**: Excel cell state
    (selection, value/formula) via the **Excel COM** object model, and control state (tab
    selected, dialog/pane open, checkbox on, field focused) via **UIA**. Visual steps — and
-   any local check that can't be determined — fall back to **Claude Haiku 4.5** vision
-   verification (full screenshot + a close-up of the target + a UIA summary). A detected step
+   any local check that can't be determined — fall back to the **open-weight vision model**
+   (full screenshot + a close-up of the target + a UIA summary). A detected step
    is confirmed by the user with a green **Next** button (no silent auto-advance); Back and
    manual Next always work.
 10. UI Automation (UIA) **grounding**: element names/roles/bounds are read and passed to the
@@ -138,13 +140,13 @@ that is always grounded in the current screenshot — never a remembered or outd
                              │               │               │
              ┌───────────────▼──┐   ┌────────▼────────┐   ┌──▼───────────────┐
              │ Capture layer    │   │ AI layer        │   │ UI layer (PySide6)│
-             │ (Windows)        │   │ (Anthropic)     │   │                   │
+             │ (Windows)        │   │ (open-weight)   │   │                   │
              │ • active window  │   │ • identify      │   │ • system tray     │
-             │ • process name   │   │   (Sonnet 5)    │   │ • capture indicator│
+             │ • process name   │   │   (vision VLM)  │   │ • capture indicator│
              │ • bounds + DPI   │   │ • plan          │   │   + pause         │
-             │ • screenshot     │   │   (Sonnet 5)    │   │ • tutorial menu   │
-             │ • change detect  │   │ • verify        │   │ • step side panel │
-             └───────┬──────────┘   │   (Haiku 4.5)   │   └───────────────────┘
+             │ • screenshot     │   │   (vision VLM)  │   │ • tutorial menu   │
+             │ • change detect  │   │ • verify (fbk)  │   │ • step side panel │
+             └───────┬──────────┘   │   (vision VLM)  │   └───────────────────┘
                      │              └────────┬────────┘
              ┌───────▼──────────┐           │
              │ Accessibility    │           ▼
@@ -164,14 +166,14 @@ that is always grounded in the current screenshot — never a remembered or outd
 ```
 appTutorial/
   SPEC.md
-  CLAUDE.md
+  AGENTS.md
   README.md
   pyproject.toml            # deps + tooling (ruff, pytest)
-  .env.example              # ANTHROPIC_API_KEY=...
+  .env.example              # OPENWEIGHT_BASE_URL=... (local Ollama by default)
   .gitignore
   src/apptutorial/
     app.py                  # entry point, tray, hotkey, orchestrator/state machine
-    config.py               # settings, denylist, API key loading, hotkey binding
+    config.py               # settings, denylist, AI backend/model config, hotkey binding
     capture/
       window.py             # active window, process name, bounds, DPI (pywin32)
       screenshot.py         # active-window screenshot (mss/PrintWindow) + scale correction
@@ -182,11 +184,11 @@ appTutorial/
       local_check.py        # deterministic step checks (UIA + Excel COM), no AI
       excel_com.py          # Excel object model: selection, cell value/formula, cell rect
     ai/
-      client.py             # Anthropic client wrapper (+ telemetry hooks)
+      client.py             # OpenAI-compatible client wrapper for the open-weight backend
       schemas.py            # Pydantic models for structured outputs (incl. StepCheck)
-      identify.py           # app identification (Sonnet 5)
-      plan.py               # tutorial planning (Sonnet 5)
-      verify.py             # step verification fallback (Haiku 4.5)
+      identify.py           # app identification (open-weight VLM)
+      plan.py               # tutorial planning (open-weight VLM)
+      verify.py             # step verification fallback (open-weight VLM)
     ui/
       tray.py               # tray icon, capture indicator, pause toggle
       menu.py               # tutorial menu
@@ -229,9 +231,9 @@ appTutorial/
 
 ## 7. Accessibility (UI Automation) grounding
 
-Claude's vision is strong at *understanding* a screen but unreliable at returning
-pixel-perfect bounding boxes for small UI elements. Windows UI Automation exposes the
-**exact** rectangle and name/role of real UI elements. The hybrid strategy:
+A vision model is strong at *understanding* a screen but unreliable at returning
+pixel-perfect bounding boxes for small UI elements (more so for open-weight models). Windows UI
+Automation exposes the **exact** rectangle and name/role of real UI elements. The hybrid strategy:
 
 - **Grounding (v1):** read the UIA element tree for the active window (names, control types,
   bounds) and pass a compact summary to the models. This grounds identification ("the ribbon
@@ -257,37 +259,42 @@ vision fallback matter.
 
 ## 8. AI integration
 
-**SDK:** official `anthropic` Python package. **Auth:** `ANTHROPIC_API_KEY` env var (an
-Anthropic **Console** key with billing; a Claude Pro/Max subscription does not grant API
-access — see CLAUDE.md for setup).
+**Open-weight only — no proprietary/cloud AI API.** The app uses an open-weight **vision**
+model served over an OpenAI-compatible API. The default backend is a **local Ollama** server,
+so screenshots never leave the machine and there is no API key or account. The `openai` Python
+package is used only as the HTTP client (it targets the configured `base_url` — localhost by
+default — not OpenAI's service). Any OpenAI-compatible endpoint works: Ollama, vLLM, llama.cpp,
+or a hosted open-weight provider (OpenRouter, Together, ...). See AGENTS.md for setup.
 
-| Role | Model | ID | Notes |
-|---|---|---|---|
-| Identify app, plan tutorials, answer questions | Claude Sonnet 5 | `claude-sonnet-5` | Vision + structured output; adaptive thinking on. |
-| Fast "did they do the step?" check | Claude Haiku 4.5 | `claude-haiku-4-5` | Vision + structured output; no thinking, small `max_tokens`, for speed/cost. |
+**Config:** `OPENWEIGHT_BASE_URL` (default `http://localhost:11434/v1`), `OPENWEIGHT_API_KEY`
+(unused by local backends), `OPENWEIGHT_IDENTIFY_MODEL`, `OPENWEIGHT_VERIFY_MODEL`.
 
-- **Vision:** the active-window screenshot is sent as a base64 image content block.
-- **Structured outputs:** every call uses JSON-schema-constrained output via Pydantic models
-  and `client.messages.parse(..., output_format=Model)` → `response.parsed_output`. This
-  guarantees machine-readable results (step = instruction + target + "done" definition).
+| Role | Model | Notes |
+|---|---|---|
+| Identify app, plan tutorials, answer questions | open-weight VLM (default `qwen2.5vl`) | Vision + JSON-schema structured output. |
+| Vision "did they do the step?" check (fallback) | open-weight VLM (default `qwen2.5vl`) | Only when the deterministic local check can't decide. |
+
+Pick any vision-capable open-weight model you have pulled (e.g. `qwen2.5vl`, `llama3.2-vision`,
+`minicpm-v`); bigger models give better plans. Both roles default to the same model but are
+independently configurable.
+
+- **Vision:** the active-window screenshot is sent as an OpenAI-style `image_url` data URI.
+- **Structured outputs:** every call goes through `AIClient.parse`, which sends a JSON-schema
+  `response_format` and validates the reply against the Pydantic model — guaranteeing
+  machine-readable results (step = instruction + target + "done" definition).
 - **Hybrid verification (local-first):** the planner also emits a machine-checkable `check`
   per step (see §8.1). When the completion state is well-defined (a cell selected/filled, a
   tab selected, a dialog open, a box checked), the tight loop verifies it **locally** (Excel
-  COM / UIA) with no API call — faster, free, and exact. Only `visual` steps, or local checks
-  that can't be determined, reach the Haiku vision call. This keeps AI usage to planning plus
-  the genuinely visual checks.
-- **Streaming:** user-facing text (e.g. step explanations) streams to the panel for
-  responsiveness; the expensive vision call still fires only on a detected screen change.
-- **Prompt caching (phase 2 optimization):** the large, stable system prompts for
-  identification/verification are cache-friendly; volatile content (screenshot, step) goes
-  last.
-- **Privacy:** screenshots are sent to the Anthropic API only for the analysis that is the
-  core function of the product. They are **not** persisted to disk and **never** included in
-  telemetry or Sentry.
+  COM / UIA) with no AI call — faster, free, and exact. Only `visual` steps, or local checks
+  that can't be determined, reach the vision model. This keeps AI usage to planning plus the
+  genuinely visual checks.
+- **Privacy:** screenshots are sent only to the configured model backend (a local Ollama server
+  by default, so they stay on the machine) for the analysis that is the core function of the
+  product. They are **not** persisted to disk and **never** included in telemetry or Sentry.
 
 ### 8.1 Structured output schemas (Pydantic)
 
-**AppIdentification** (Sonnet 5):
+**AppIdentification** (identify):
 ```jsonc
 {
   "app_name": "Microsoft Excel",
@@ -303,7 +310,7 @@ access — see CLAUDE.md for setup).
 }
 ```
 
-**TutorialPlan** (Sonnet 5):
+**TutorialPlan** (plan):
 ```jsonc
 {
   "goal": "Record a simple macro",
@@ -337,9 +344,9 @@ access — see CLAUDE.md for setup).
 }
 ```
 `cell_selected`/`cell_value` are checked via Excel COM; the element/checkbox/value kinds via
-UIA; `visual` (or any undetermined local check) falls back to the Haiku vision check.
+UIA; `visual` (or any undetermined local check) falls back to the vision model.
 
-**StepVerification** (Haiku 4.5):
+**StepVerification** (verify):
 ```jsonc
 {
   "status": "done",                 // done | not_done | unclear | off_track
@@ -357,15 +364,15 @@ UIA; `visual` (or any undetermined local check) falls back to the Haiku vision c
 IDLE
   └─(hotkey)→ CHECK_PRIVACY
         ├─(app on denylist)→ BLOCKED → IDLE
-        └─(allowed)→ CAPTURE → IDENTIFYING (Sonnet 5)
+        └─(allowed)→ CAPTURE → IDENTIFYING (vision model)
                         └→ MENU
-                             └─(pick tutorial / type goal)→ PLANNING (Sonnet 5)
+                             └─(pick tutorial / type goal)→ PLANNING (vision model)
                                    └→ GUIDING(step i)  [highlight overlay on target]
                                         ├─ local check (Excel COM / UIA, every ~0.8s, no AI)
                                         │     ├─ done → AWAIT_CONFIRM (green Next)
                                         │     ├─ not done → keep watching
                                         │     └─ undetermined (xN) → AI fallback ↓
-                                        ├─(screen change / heartbeat, visual steps)→ VERIFYING (Haiku 4.5)
+                                        ├─(screen change / heartbeat, visual steps)→ VERIFYING (vision model)
                                         │     ├─ done → AWAIT_CONFIRM (green Next)
                                         │     ├─ not_done/off_track → show hint, stay
                                         │     └─ unclear → wait / allow manual advance
@@ -389,11 +396,11 @@ can pause at any time.
 - **Capture indicator + pause.** While a session is active, a clear indicator is always
   visible; a pause control immediately halts all capture and API activity.
 - **No persistence of screen content.** Screenshots/prompts are held in memory only, sent to
-  the Anthropic API for analysis, and never written to disk, logs, or telemetry/Sentry.
-- **Transparency.** The screenshot does leave the machine — it goes to the Anthropic API,
-  which is inherent to a vision-based tutor. This is stated plainly to the user; the privacy
-  guarantees are about scope (active window only), control (denylist + pause), and
-  non-persistence (never logged/stored).
+  the configured model backend for analysis, and never written to disk, logs, or telemetry/Sentry.
+- **Local by default.** With the default local backend (Ollama), the screenshot never leaves the
+  machine at all. Only if the user deliberately points `OPENWEIGHT_BASE_URL` at a hosted
+  provider does it leave — a conscious opt-in. Either way the guarantees hold: scope (active
+  window only), control (denylist + pause), and non-persistence (never logged/stored).
 - **Phase 2:** detect and blur password/secure fields (via UIA) before sending.
 
 ---
@@ -416,10 +423,11 @@ can pause at any time.
 | Vision coordinates imprecise for small UI elements | Accessibility-first hybrid: UIA bounds + text anchors; vision only as fallback (phase 2 overlay). |
 | UIA coverage varies by app | Target Excel first (strong UIA); vision fallback + text anchors for weak-coverage apps. |
 | Stale UI guidance | Every step verified against the live screenshot; identification/planning grounded in current screen + UIA, never assumed versions. |
-| API cost from frequent vision calls | Local change-detection gates verification; Haiku (cheap) for the tight loop; Sonnet only for ID/planning. |
-| DPI / multi-monitor misalignment | Per-monitor DPI awareness handled centrally in the capture layer; scale-factor normalization. |
-| Privacy exposure | Active-window-only capture, denylist, indicator + pause, no persistence, no screenshots in telemetry. |
-| User has no API access | Pro/Max doesn't grant API access; setup steps for a Console key in CLAUDE.md. |
+| Cost/latency of frequent vision calls | Deterministic local (UIA/COM) checks handle most steps with no AI call; a local model is free; change-detection gates the fallback vision calls. |
+| Weaker open-weight model quality | Local UIA/COM verification doesn't depend on the model; bigger/hosted open-weight models can be configured for better plans. |
+| DPI / multi-monitor misalignment | Per-monitor DPI awareness; overlay positioned in physical pixels via SetWindowPos (not Qt logical coords). |
+| Privacy exposure | Active-window-only capture, denylist, indicator + pause, local model by default, no persistence, no screenshots in telemetry. |
+| Getting the model running | One-time Ollama install + `ollama pull <vision model>`; no cloud account or API key. |
 
 ---
 

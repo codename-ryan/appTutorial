@@ -63,6 +63,7 @@ def move_window_physical(hwnd: int, left: int, top: int, width: int, height: int
     """
     hwnd_topmost = -1
     swp_noactivate = 0x0010
+    left, top, width, height = int(left), int(top), int(width), int(height)
     try:
         set_window_pos = ctypes.windll.user32.SetWindowPos
         set_window_pos.argtypes = [
@@ -75,9 +76,18 @@ def move_window_physical(hwnd: int, left: int, top: int, width: int, height: int
             ctypes.c_uint,
         ]
         set_window_pos.restype = wintypes.BOOL
-        set_window_pos(
-            hwnd, hwnd_topmost, int(left), int(top), int(width), int(height), swp_noactivate
-        )
+        set_window_pos(hwnd, hwnd_topmost, left, top, width, height, swp_noactivate)
+        # Self-correct: a DPI-virtualized / Qt-managed layered window can land shifted by a
+        # constant offset. Measure where it actually went and nudge by the difference so the
+        # frame sits exactly on the target (invisible on big elements, obvious on tiny cells).
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            dx = left - rect.left
+            dy = top - rect.top
+            if dx or dy:
+                set_window_pos(
+                    hwnd, hwnd_topmost, left + dx, top + dy, width, height, swp_noactivate
+                )
     except (AttributeError, OSError):
         pass
 
